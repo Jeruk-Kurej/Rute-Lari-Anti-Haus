@@ -1,0 +1,7 @@
+__pycache__/
+.DS_Store
+afl2_rute/cache/http/
+/cache/
+*.zip
+*.pdf
+*.ipynb
