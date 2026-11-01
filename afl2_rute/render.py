@@ -9,6 +9,7 @@ from .runner import unit
 COLORS = {
     "background": (246, 244, 239),
     "zone": (76, 155, 232),
+    "building": (228, 223, 214),
     "road": (196, 201, 206),
     "safe_road": (110, 122, 132),
     "baseline": (224, 123, 57),
@@ -111,7 +112,13 @@ class MapView:
         return self.scale >= self.fit_scale * LABEL_ZOOM
 
 
-# --- Layer statis: zona buffer dan jalan ---
+# --- Layer statis: bangunan, zona buffer, dan jalan ---
+def draw_buildings(surface, view, buildings, area):
+    """Gambar bangunan sebagai poligon. Hanya bangunan yang masuk kotak `area` (bagian peta yang terlihat) yang digambar."""
+    for polygon in buildings.geometry.iloc[buildings.sindex.query(area)]:
+        pygame.draw.polygon(surface, COLORS["building"], view.path(polygon.exterior))
+
+
 def draw_zone(surface, view, zone, color, alpha=55):
     """Gambar zona aman: poligon biru transparan (mode Radius) atau koridor di sepanjang jalan (mode Lewat jalan)."""
     layer = pygame.Surface(surface.get_size(), pygame.SRCALPHA)
@@ -177,8 +184,9 @@ def draw_scale_bar(surface, view, font):
 def draw_base(surface, view, data, scene, font):
     """Gambar lapisan dasar yang jarang berubah: latar, zona, semua jalan (jalan aman lebih gelap), dan nama jalan."""
     surface.fill(COLORS["background"])
-    draw_zone(surface, view, scene.zone, COLORS["zone"])
     area = view.visible_box()
+    draw_buildings(surface, view, data.buildings, area)
+    draw_zone(surface, view, scene.zone, COLORS["zone"])
     for edges, key in ((data.edges, "road"), (scene.safe_edges, "safe_road")):
         visible = edges.iloc[edges.sindex.query(area)]
         for road_class, group in visible.groupby("road_class"):

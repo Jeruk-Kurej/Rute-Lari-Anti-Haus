@@ -8,6 +8,7 @@ CARD = (244, 246, 248)
 ACCENT = (30, 142, 90)
 LEGEND = [
     ("zone", "zone", "Zona buffer"),
+    ("building", "building", "Bangunan"),
     ("line", "safe_road", "Jalan dalam zona"),
     ("line", "road", "Jalan luar zona"),
     *(("road", name, name) for name in ROAD_STYLES),
@@ -247,6 +248,8 @@ class Panel:
             sample = [(item_x, item_y), (item_x + 18, item_y)]
             if shape == "zone":
                 pygame.draw.rect(surface, (205, 225, 246), (item_x, item_y - 5, 18, 10))
+            elif shape == "building":
+                pygame.draw.rect(surface, COLORS[key], (item_x, item_y - 5, 18, 10))
             elif shape == "road":
                 min_px, _, dashed = ROAD_STYLES[key]
                 draw_polyline(surface, sample, COLORS["safe_road"], min_px, dashed)
