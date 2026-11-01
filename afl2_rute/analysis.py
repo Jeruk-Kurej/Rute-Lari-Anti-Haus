@@ -1,16 +1,20 @@
+"""Perhitungan rute: zona aman, rute terpendek vs anti-haus, rute ulang, dan titik hidrasi terdekat."""
 from dataclasses import dataclass
 
 import geopandas as gpd
 import networkx as nx
 import shapely
-from shapely.geometry import LineString, Point
+from shapely.geometry import LineString
 from shapely.ops import substring
 
 from . import config
+from .network import join
+from .zones import ZONES
 
 
 @dataclass
 class Scene:
+    """Hasil satu kali pengaturan: titik yang buka, zona aman, dan graph yang hanya berisi ruas aman."""
     tolerance_m: int
     points: gpd.GeoDataFrame
     zone: shapely.Geometry
@@ -20,6 +24,7 @@ class Scene:
 
 @dataclass
 class Comparison:
+    """Rute terpendek (baseline) dan rute anti-haus, plus keterangan hasilnya."""
     baseline: LineString
     safe: LineString | None
     status: str
@@ -27,172 +32,129 @@ class Comparison:
 
 @dataclass
 class Reroute:
+    """Rute baru dari posisi pelari. via_outside = True kalau pelari harus kembali ke zona dulu."""
     line: LineString
     via_outside: bool
 
 
 @dataclass
 class NextHydration:
+    """Titik hidrasi terdekat dari posisi pelari: nama, jarak lewat jalan, dan garis jalurnya."""
     name: str
     distance_m: float
     path: LineString | None
 
 
-# --- Operasi GIS: buffer + union, lalu spatial selection (within) ---
-def radius_zone(data, points, tolerance_m):
-    zone = points.buffer(tolerance_m).union_all()
-    return zone, data.edges[data.edges.within(zone.buffer(1))]
+class RoutePlanner:
+    """Semua perhitungan rute. Dibuat sekali dari Dataset, lalu dipakai berulang oleh aplikasi."""
 
+    def __init__(self, data):
+        self.data = data
+        self.network = data.network
+        self.zones = {name: kind(data) for name, kind in ZONES.items()}
 
-# --- Zona lewat jalan: jarak menyusuri jalan dari titik hidrasi terdekat ---
-def road_distances(data, points):
-    sources = {}
-    for geom in points.geometry:
-        node = nearest_node(data, geom.x, geom.y)
-        sources[node] = min(sources.get(node, float("inf")), data.nodes.geometry[node].distance(geom))
-    G, source = data.G, "titik_hidrasi"
-    G.add_node(source)
-    G.add_weighted_edges_from(((source, node, offset) for node, offset in sources.items()), weight="length")
-    try:
-        return nx.single_source_dijkstra_path_length(G, source, weight="length")
-    finally:
-        G.remove_node(source)
+    # --- Zona dan graph aman ---
+    def build_scene(self, tolerance_m, closed=(), mode=config.ZONE_MODES[0]):
+        """Hitung zona aman untuk toleransi tertentu. Titik di `closed` dianggap tutup."""
+        points = self.data.points[~self.data.points["name"].isin(closed)]
+        zone, safe_edges = self.zones[mode].build(points, tolerance_m)
+        return Scene(tolerance_m, points, zone, safe_edges, self.network.G.edge_subgraph(safe_edges.index))
 
-
-def road_zone(data, points, tolerance_m):
-    distances = road_distances(data, points)
-    u = data.edges.index.get_level_values(0).map(distances)
-    v = data.edges.index.get_level_values(1).map(distances)
-    farthest = (u.to_numpy(float) + v.to_numpy(float) + data.edges["length"].to_numpy()) / 2
-    safe_edges = data.edges[farthest <= tolerance_m]
-    return shapely.MultiLineString(list(safe_edges.geometry)), safe_edges
-
-
-def build_scene(data, tolerance_m, closed=(), mode=config.ZONE_MODES[0]):
-    points = data.points[~data.points["name"].isin(closed)]
-    zone, safe_edges = (radius_zone if mode == config.ZONE_MODES[0] else road_zone)(data, points, tolerance_m)
-    return Scene(tolerance_m, points, zone, safe_edges, data.G.edge_subgraph(safe_edges.index))
-
-
-# --- Graph jalan ---
-def nearest_node(data, x, y):
-    return data.nodes.distance(Point(x, y)).idxmin()
-
-
-def landmark_node(data, name):
-    geom = data.landmarks.set_index("name").geometry[name]
-    return nearest_node(data, geom.x, geom.y)
-
-
-def edge_line(G, u, v):
-    attrs = min(G.get_edge_data(u, v).values(), key=lambda d: d["length"])
-    start, end = (G.nodes[u]["x"], G.nodes[u]["y"]), (G.nodes[v]["x"], G.nodes[v]["y"])
-    if "geometry" not in attrs:
-        return LineString([start, end])
-    line = attrs["geometry"]
-    return line if Point(line.coords[0]).distance(Point(start)) <= Point(line.coords[-1]).distance(Point(start)) else line.reverse()
-
-
-def route_coords(G, path):
-    coords = []
-    for u, v in zip(path[:-1], path[1:]):
-        part = list(edge_line(G, u, v).coords)
-        coords.extend(part if not coords else part[1:])
-    return coords
-
-
-def route_line(G, path):
-    return LineString(route_coords(G, path))
-
-
-def join(*parts):
-    coords = []
-    for part in parts:
-        coords.extend(part if not coords else part[1:])
-    return coords
-
-
-def shortest_path(G, origin, target):
-    try:
-        return nx.shortest_path(G, origin, target, weight="length")
-    except (nx.NetworkXNoPath, nx.NodeNotFound):
+    def minimum_tolerance(self, origin, target, closed=(), mode=config.ZONE_MODES[0]):
+        """Toleransi terkecil yang membuat rute anti-haus ada. None kalau sampai batas pencarian tetap tidak ada."""
+        for tolerance in config.TOLERANCE_SEARCH_M:
+            G = self.build_scene(tolerance, closed, mode).safe_graph
+            if G.has_node(origin) and G.has_node(target) and nx.has_path(G, origin, target):
+                return tolerance
         return None
 
+    def landmark_node(self, name):
+        """Node jalan tempat landmark (titik awal/akhir) berada."""
+        return self.data.landmarks.set_index("name")["node"][name]
 
-# --- Routing: baseline vs anti-haus ---
-def compare(data, scene, origin, target):
-    baseline = route_line(data.G, shortest_path(data.G, origin, target))
-    outside = [label for label, node in (("awal", origin), ("akhir", target)) if not scene.safe_graph.has_node(node)]
-    if outside:
-        return Comparison(baseline, None, f"Tidak ada rute anti-haus: titik {' & '.join(outside)} di luar zona")
-    path = shortest_path(scene.safe_graph, origin, target)
-    if path is None:
-        return Comparison(baseline, None, "Tidak ada rute anti-haus: zona tidak tersambung")
-    return Comparison(baseline, route_line(scene.safe_graph, path), "Rute anti-haus ditemukan")
+    # --- Rute terpendek vs anti-haus ---
+    def compare(self, scene, origin, target):
+        """Bandingkan rute terpendek di semua jalan dengan rute terpendek yang hanya lewat ruas aman."""
+        net = self.network
+        baseline = net.route(net.shortest_path(origin, target))
+        outside = [label for label, node in (("awal", origin), ("akhir", target)) if not scene.safe_graph.has_node(node)]
+        if outside:
+            return Comparison(baseline, None, f"Tidak ada rute anti-haus: titik {' & '.join(outside)} di luar zona")
+        path = net.shortest_path(origin, target, scene.safe_graph)
+        if path is None:
+            return Comparison(baseline, None, "Tidak ada rute anti-haus: zona tidak tersambung")
+        return Comparison(baseline, net.route(path, scene.safe_graph), "Rute anti-haus ditemukan")
 
+    def paths_to_target(self, scene, target):
+        """Jarak dan jalur dari setiap persimpangan aman ke titik akhir (dipakai untuk rute ulang)."""
+        if not scene.safe_graph.has_node(target):
+            return {}, {}
+        return nx.single_source_dijkstra(scene.safe_graph, target, weight="length")
 
-# --- Rute ulang dari posisi pelari (dihitung lagi tiap keluar jalur) ---
-def paths_to_target(scene, target):
-    if not scene.safe_graph.has_node(target):
-        return {}, {}
-    return nx.single_source_dijkstra(scene.safe_graph, target, weight="length")
+    def reroute(self, scene, to_target, u, v, offset_m):
+        """Rute baru ke titik akhir dari posisi pelari (di ruas u-v, sudah offset_m meter dari u).
 
+        Kalau pelari masih di ruas aman, ia langsung menuju titik akhir lewat zona. Kalau tidak,
+        ia kembali dulu ke persimpangan zona terdekat (via_outside = True).
+        """
+        net = self.network
+        lengths, paths = to_target
+        line = net.line(u, v)
+        ends = ((u, offset_m, 0.0), (v, line.length - offset_m, line.length))
+        options = []  # (jarak total, titik masuk zona, jalur menuju titik masuk, ujung ruas yang dipakai)
+        if scene.safe_graph.has_edge(u, v):
+            options = [(lead + lengths[node], node, [node], end) for node, lead, end in ends if node in lengths]
+        via_outside = not options
+        if via_outside:
+            for node, lead, end in ends:
+                reach, approach = nx.single_source_dijkstra(net.G, node, weight="length")
+                options += [(lead + reach[entry], entry, approach[entry], end) for entry in lengths if entry in reach]
+        if not options:
+            return None
+        _, entry, approach, end = min(options, key=lambda option: option[0])
+        coords = join(
+            list(substring(line, offset_m, end).coords),
+            net.coords(approach),
+            net.coords(paths[entry][::-1], scene.safe_graph),
+        )
+        return Reroute(LineString(coords), via_outside) if len(coords) > 1 else None
 
-def reroute(data, scene, to_target, u, v, offset_m):
-    lengths, paths = to_target
-    line = edge_line(data.G, u, v)
-    ends = ((u, offset_m, 0.0), (v, line.length - offset_m, line.length))
-    options = []
-    if scene.safe_graph.has_edge(u, v):
-        options = [(lead + lengths[node], node, [node], end) for node, lead, end in ends if node in lengths]
-    via_outside = not options
-    if via_outside:
-        for node, lead, end in ends:
-            reach, approach = nx.single_source_dijkstra(data.G, node, weight="length")
-            options += [(lead + reach[entry], entry, approach[entry], end) for entry in lengths if entry in reach]
-    if not options:
-        return None
-    _, entry, approach, end = min(options, key=lambda option: option[0])
-    coords = join(
-        list(substring(line, offset_m, end).coords),
-        route_coords(data.G, approach),
-        route_coords(scene.safe_graph, paths[entry][::-1]),
-    )
-    return Reroute(LineString(coords), via_outside) if len(coords) > 1 else None
+    # --- Metrik ---
+    def farthest_gap(self, line, points):
+        """Jarak terjauh (garis lurus) dari rute ke titik hidrasi terdekat, diperiksa tiap SAMPLE_STEP_M meter."""
+        if points.empty:
+            return None
+        samples = shapely.points(shapely.get_coordinates(shapely.segmentize(line, config.SAMPLE_STEP_M)))
+        return float(shapely.distance(samples, points.union_all()).max())
 
+    def stats(self, line, points):
+        """Angka untuk tabel hasil: panjang rute dan jarak terjauhnya ke titik hidrasi."""
+        return {"panjang_m": line.length, "jarak_terjauh_m": self.farthest_gap(line, points)}
 
-def minimum_tolerance(data, origin, target, closed=(), mode=config.ZONE_MODES[0]):
-    for tolerance in config.TOLERANCE_SEARCH_M:
-        G = build_scene(data, tolerance, closed, mode).safe_graph
-        if G.has_node(origin) and G.has_node(target) and nx.has_path(G, origin, target):
-            return tolerance
-    return None
+    # --- Titik hidrasi terdekat dari posisi pelari ---
+    def next_hydration(self, points, u, v, offset_m):
+        """Cari titik hidrasi terdekat lewat jalan dari pelari (di ruas u-v, offset_m meter dari u)."""
+        if points.empty:
+            return None
+        net = self.network
+        nearest = {}  # node -> (jarak toko ke node, nama, koordinat) untuk toko terdekat di node itu
+        for name, geom, node, gap in zip(points["name"], points.geometry, points["node"], points["offset_m"]):
+            if node not in nearest or gap < nearest[node][0]:
+                nearest[node] = (gap, name, (geom.x, geom.y))
 
-
-# --- Metrik ---
-def max_gap_to_points(line, points):
-    if points.empty:
-        return None
-    samples = shapely.points(shapely.get_coordinates(shapely.segmentize(line, config.SAMPLE_STEP_M)))
-    return float(shapely.distance(samples, points.union_all()).max())
-
-
-def route_stats(line, points):
-    return {"panjang_m": line.length, "jarak_terjauh_m": max_gap_to_points(line, points)}
-
-
-def next_hydration(data, points, u, v, offset_m):
-    if points.empty:
-        return None
-    point_nodes = {}
-    for name, geom in zip(points["name"], points.geometry):
-        point_nodes.setdefault(nearest_node(data, geom.x, geom.y), name)
-    line = edge_line(data.G, u, v)
-    best = None
-    for node, lead_m, end_m in ((u, offset_m, 0.0), (v, line.length - offset_m, line.length)):
-        distance, path = nx.multi_source_dijkstra(data.G, set(point_nodes), target=node, weight="length")
-        if best is None or lead_m + distance < best[0]:
-            best = (lead_m + distance, path[::-1], end_m)
-    distance, path, end_m = best
-    coords = join(list(substring(line, offset_m, end_m).coords), route_coords(data.G, path))
-    return NextHydration(point_nodes[path[-1]], distance, LineString(coords) if len(coords) > 1 else None)
+        line = net.line(u, v)
+        best = None  # (jarak total, jalur dari ujung ruas ke toko, posisi ujung ruas)
+        with net.virtual_source({node: found[0] for node, found in nearest.items()}) as source:
+            for node, lead_m, end_m in ((u, offset_m, 0.0), (v, line.length - offset_m, line.length)):
+                try:
+                    distance, path = nx.single_source_dijkstra(net.G, source, target=node, weight="length")
+                except nx.NetworkXNoPath:
+                    continue
+                if best is None or lead_m + distance < best[0]:
+                    best = (lead_m + distance, path[:0:-1], end_m)
+        if best is None:
+            return None
+        distance, path, end_m = best
+        _, name, shop_xy = nearest[path[-1]]
+        coords = join(list(substring(line, offset_m, end_m).coords), net.coords(path)) + [shop_xy]
+        return NextHydration(name, distance, LineString(coords) if len(coords) > 1 else None)
