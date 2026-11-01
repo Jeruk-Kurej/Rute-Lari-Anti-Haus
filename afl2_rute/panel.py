@@ -1,3 +1,4 @@
+"""Panel kanan: kartu input, tabel hasil, skenario, demo pelari, legenda, dan bantuan."""
 import pygame
 
 from .render import COLORS, ROAD_STYLES, draw_icon, draw_polyline, text
@@ -34,14 +35,17 @@ HELP_STEPS = [
 
 
 def meters(value):
+    """Format angka jadi teks meter, misal 1250 -> "1.250 m". None -> "-"."""
     return "-" if value is None else f"{value:,.0f} m".replace(",", ".")
 
 
 def signed(value):
+    """Seperti meters(), tapi dengan tanda + atau -, untuk selisih panjang."""
     return "-" if value is None else ("+" if value >= 0 else "−") + meters(abs(value))
 
 
 def trail_note(app):
+    """Catatan di bawah tabel hasil yang menjelaskan asal rute pelari."""
     if app.arrived:
         return "Rute pelari = jejak sampai titik akhir."
     if app.reroute is None:
@@ -52,6 +56,7 @@ def trail_note(app):
 
 
 def wrap(font, value, width):
+    """Pecah teks panjang jadi beberapa baris yang masing-masing muat dalam `width` piksel."""
     lines = [""]
     for word in value.split():
         candidate = f"{lines[-1]} {word}".strip()
@@ -64,7 +69,10 @@ def wrap(font, value, width):
 
 # --- Panel samping: kartu bernomor sesuai alur proposal ---
 class Panel:
+    """Panel kanan: kartu bernomor sesuai alur proposal (atur rute, hasil, skenario, demo pelari, tambahan)."""
+
     def __init__(self, app, rect, fonts):
+        """Susun posisi semua dropdown dan tombol di panel."""
         self.app, self.rect, self.fonts = app, rect, fonts
         self.help_open, self.legend_open = True, False
         self.x, self.width = rect.x + 20, rect.w - 40
@@ -87,15 +95,19 @@ class Panel:
         ]
 
     def show_help(self):
+        """Buka layar bantuan."""
         self.help_open = True
 
     def toggle_legend(self):
+        """Buka/tutup kotak legenda di peta."""
         self.legend_open = not self.legend_open
 
     def legend_label(self):
+        """Teks tombol legenda: "Legenda" atau "Tutup legenda"."""
         return "Tutup legenda" if self.legend_open else "Legenda"
 
     def click(self, pos):
+        """Proses klik di panel. True kalau klik dipakai panel, False kalau harus diteruskan ke peta."""
         opened = next((d for d in self.dropdowns if d.open), None)
         for dropdown in self.dropdowns:
             dropdown.open = False
@@ -118,6 +130,7 @@ class Panel:
 
     # --- Gambar ---
     def card(self, surface, y, h, title, accent=False):
+        """Gambar satu kartu (kotak abu-abu muda) dengan judul. `accent` menambah garis hijau di kiri."""
         rect = pygame.Rect(self.x, y, self.width, h)
         pygame.draw.rect(surface, CARD, rect, border_radius=8)
         if accent:
@@ -126,6 +139,7 @@ class Panel:
             text(surface, self.fonts["bold"], title, (self.ix, y + 10))
 
     def draw(self, surface, mouse):
+        """Gambar seluruh panel kanan, termasuk legenda dan layar bantuan kalau sedang terbuka."""
         fonts = self.fonts
         pygame.draw.rect(surface, COLORS["white"], self.rect)
         pygame.draw.line(surface, (220, 222, 226), self.rect.topleft, self.rect.bottomleft)
@@ -152,6 +166,7 @@ class Panel:
             self.draw_help(surface)
 
     def draw_route_card(self, surface, y):
+        """Kartu 1: titik awal, titik akhir, dan toleransi."""
         app, fonts = self.app, self.fonts
         self.card(surface, y, 196, "1. Atur rute", accent=True)
         for row_y, label in ((y + 52, "Titik awal"), (y + 86, "Titik akhir"), (y + 120, "Toleransi")):
@@ -162,6 +177,7 @@ class Panel:
             text(surface, fonts["small"], app.min_message, (self.ix, y + 176), COLORS["muted"])
 
     def draw_result_card(self, surface, y):
+        """Kartu 2: tabel panjang, selisih, dan jarak terjauh ke titik hidrasi untuk tiap rute."""
         app, fonts, ix = self.app, self.fonts, self.ix
         self.card(surface, y, 196, "2. Hasil: terpendek vs anti-haus", accent=True)
         found = app.comparison.safe is not None
@@ -191,12 +207,14 @@ class Panel:
             text(surface, fonts["small"], note, (ix, y + 98 + len(rows) * 20 + i * 16), COLORS["muted"])
 
     def draw_scenario_card(self, surface, y):
+        """Kartu 3: berapa titik hidrasi yang sedang ditutup."""
         app, fonts = self.app, self.fonts
         self.card(surface, y, 92, "3. Skenario: tutup titik hidrasi")
         text(surface, fonts["small"], "Klik titik hidrasi di peta untuk menutup / membukanya.", (self.ix, y + 34), COLORS["muted"])
         text(surface, fonts["body"], f"Ditutup: {len(app.closed)} dari {len(app.data.points)} titik", (self.ix, y + 69), anchor="midleft")
 
     def draw_runner_card(self, surface, y):
+        """Kartu 4: hasil tombol Hitung (titik hidrasi terdekat dari pelari)."""
         app, fonts = self.app, self.fonts
         self.card(surface, y, 116, "4. Demo pelari")
         text(surface, fonts["small"], "W/A/S/D gerak · R reset", (self.ix + self.iw, y + 12), COLORS["muted"], anchor="topright")
@@ -210,6 +228,7 @@ class Panel:
         text(surface, fonts["bold"], f"Jarak lewat jalan: {meters(app.hit.distance_m)}", (self.ix, y + 92))
 
     def legend_rect(self):
+        """Posisi dan ukuran kotak legenda di pojok kanan bawah peta."""
         area = self.app.map_rect
         rows = -(-len(LEGEND) // 2)
         rect = pygame.Rect(0, 0, 300, 44 + rows * LEGEND_ROW_PX)
@@ -217,6 +236,7 @@ class Panel:
         return rect
 
     def draw_legend(self, surface):
+        """Gambar kotak legenda: arti warna, garis, dan ikon di peta."""
         fonts, box = self.fonts, self.legend_rect()
         pygame.draw.rect(surface, COLORS["white"], box, border_radius=8)
         pygame.draw.rect(surface, (205, 210, 216), box, 1, border_radius=8)
@@ -239,6 +259,7 @@ class Panel:
             text(surface, fonts["small"], label, (item_x + 26, item_y), anchor="midleft")
 
     def draw_help(self, surface):
+        """Gambar layar "Cara pakai" di atas peta."""
         fonts = self.fonts
         area = self.app.map_rect
         card = pygame.Rect(0, 0, 560, 0)

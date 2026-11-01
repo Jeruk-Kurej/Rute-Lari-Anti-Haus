@@ -1,3 +1,4 @@
+"""Komponen antarmuka dasar: tombol dan dropdown."""
 from dataclasses import dataclass
 from typing import Callable
 
@@ -12,15 +13,19 @@ HOVER = (226, 236, 248)
 
 @dataclass
 class Button:
+    """Tombol. `label` boleh teks tetap atau fungsi (kalau teksnya berubah), `enabled` mengatur aktif/nonaktif."""
+
     rect: pygame.Rect
     label: str | Callable[[], str]
     action: Callable[[], None]
     enabled: Callable[[], bool] = lambda: True
 
     def hit(self, pos):
+        """True kalau tombol aktif dan posisi `pos` ada di dalamnya."""
         return self.enabled() and self.rect.collidepoint(pos)
 
     def draw(self, surface, font, mouse):
+        """Gambar tombol (berubah warna saat mouse di atasnya)."""
         active = self.enabled()
         fill = HOVER if active and self.rect.collidepoint(mouse) else COLORS["white"]
         pygame.draw.rect(surface, fill, self.rect, border_radius=6)
@@ -31,6 +36,8 @@ class Button:
 
 @dataclass
 class Dropdown:
+    """Kotak pilihan. `options`, `value`, dan `on_select` berupa fungsi supaya selalu mengikuti kondisi terbaru."""
+
     rect: pygame.Rect
     options: Callable[[], list]
     value: Callable[[], str]
@@ -38,15 +45,18 @@ class Dropdown:
     open: bool = False
 
     def list_rect(self):
+        """Area daftar pilihan saat dropdown dibuka (tepat di bawah kotaknya)."""
         return pygame.Rect(self.rect.x, self.rect.bottom + 2, self.rect.w, ITEM_HEIGHT * len(self.options()))
 
     def item_at(self, pos):
+        """Pilihan yang ada di posisi `pos`, atau None kalau di luar daftar."""
         area = self.list_rect()
         if not area.collidepoint(pos):
             return None
         return self.options()[(pos[1] - area.y) // ITEM_HEIGHT]
 
     def draw_box(self, surface, font, mouse):
+        """Gambar kotak dropdown (nilai yang terpilih dan tanda panah)."""
         fill = HOVER if self.rect.collidepoint(mouse) else COLORS["white"]
         pygame.draw.rect(surface, fill, self.rect, border_radius=6)
         pygame.draw.rect(surface, BORDER, self.rect, 1, border_radius=6)
@@ -55,6 +65,7 @@ class Dropdown:
         pygame.draw.polygon(surface, COLORS["muted"], [(x - 5, y - 2), (x + 5, y - 2), (x, y + 4)])
 
     def draw_list(self, surface, font, mouse):
+        """Gambar daftar pilihan yang terbuka."""
         area = self.list_rect()
         pygame.draw.rect(surface, COLORS["white"], area)
         for i, name in enumerate(self.options()):

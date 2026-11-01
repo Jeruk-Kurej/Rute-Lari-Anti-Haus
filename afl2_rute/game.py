@@ -1,14 +1,17 @@
+"""Aplikasi utama: loop pygame, input mouse/keyboard, dan penghubung antara data, analisis, dan tampilan."""
 import math
 
 import pygame
 import shapely
 from shapely.geometry import LineString
 
-from . import analysis, config
+from . import config
+from .analysis import RoutePlanner
 from .panel import Panel, meters
 from .render import (
-    COLORS, MapView, draw_base, draw_landmarks, draw_points, draw_route, draw_runner, text,
+    COLORS, MapView, draw_base, draw_landmarks, draw_points, draw_route, draw_runner,
 )
+from .network import join
 from .runner import Runner, unit
 
 WINDOW_SIZE = (1240, 780)
@@ -26,7 +29,10 @@ MOVE_KEYS = {pygame.K_w: (0, 1), pygame.K_s: (0, -1), pygame.K_a: (-1, 0), pygam
 
 
 class App:
+    """Aplikasi utama. Menyimpan pengaturan pengguna, menghitung ulang hasil saat berubah, dan menggambar semuanya."""
+
     def __init__(self, data):
+        """Buka jendela, siapkan font, kamera, panel, dan nilai awal (dua landmark pertama, toleransi default)."""
         pygame.init()
         pygame.display.set_caption("Generator Rute Lari Anti-Haus · Citraland Surabaya")
         self.screen = pygame.display.set_mode(WINDOW_SIZE)
@@ -37,6 +43,7 @@ class App:
             "title": pygame.font.SysFont(FONT, 20, bold=True),
         }
         self.data = data
+        self.planner = RoutePlanner(data)
         self.map_rect = pygame.Rect(0, 0, MAP_WIDTH, WINDOW_SIZE[1])
         self.view = MapView(self.map_rect, data.edges.total_bounds)
         self.base = pygame.Surface(WINDOW_SIZE)
@@ -55,18 +62,20 @@ class App:
 
     # --- Perhitungan ulang saat input berubah ---
     def refresh(self):
-        self.scene = analysis.build_scene(self.data, self.tolerance, self.closed, self.zone_mode)
-        self.origin = analysis.landmark_node(self.data, self.start)
-        self.target = analysis.landmark_node(self.data, self.end)
-        self.comparison = analysis.compare(self.data, self.scene, self.origin, self.target)
+        """Hitung ulang zona, rute terpendek vs anti-haus, dan tabel hasil. Dipanggil tiap pengaturan berubah."""
+        self.scene = self.planner.build_scene(self.tolerance, self.closed, self.zone_mode)
+        self.origin = self.planner.landmark_node(self.start)
+        self.target = self.planner.landmark_node(self.end)
+        self.comparison = self.planner.compare(self.scene, self.origin, self.target)
         routes = {"Baseline": self.comparison.baseline, "Anti-haus": self.comparison.safe}
-        self.stats = {label: analysis.route_stats(line, self.scene.points) for label, line in routes.items() if line is not None}
-        self.to_target = analysis.paths_to_target(self.scene, self.target)
+        self.stats = {label: self.planner.stats(line, self.scene.points) for label, line in routes.items() if line is not None}
+        self.to_target = self.planner.paths_to_target(self.scene, self.target)
         self.calculated, self.hit = False, None
         self.base_dirty = True
         self.update_trail()
 
     def select(self, which, name):
+        """Ganti titik awal atau akhir. Kalau sama dengan lawannya, keduanya ditukar."""
         other = "end" if which == "start" else "start"
         if name == getattr(self, other):
             setattr(self, other, getattr(self, which))
@@ -76,12 +85,14 @@ class App:
         self.reset_runner()
 
     def change_tolerance(self, direction):
+        """Naik/turunkan toleransi satu langkah (direction = +1 atau -1), dalam batas pencarian."""
         limits = config.TOLERANCE_SEARCH_M
         self.tolerance = min(max(self.tolerance + direction * config.TOLERANCE_STEP_M, limits.start), limits[-1])
         self.refresh()
 
     def find_minimum_tolerance(self):
-        found = analysis.minimum_tolerance(self.data, self.origin, self.target, self.closed, self.zone_mode)
+        """Cari toleransi terkecil yang membuat rute anti-haus ada, lalu terapkan."""
+        found = self.planner.minimum_tolerance(self.origin, self.target, self.closed, self.zone_mode)
         if found is None:
             self.min_message = f"Toleransi minimum: tidak ada sampai {meters(config.TOLERANCE_SEARCH_M[-1])}"
             return
@@ -90,56 +101,63 @@ class App:
         self.refresh()
 
     def toggle_zone_mode(self):
+        """Ganti mode zona antara Radius dan Lewat jalan."""
         modes = config.ZONE_MODES
         self.zone_mode = modes[(modes.index(self.zone_mode) + 1) % len(modes)]
         self.min_message = None
         self.refresh()
 
     def toggle_point(self, name):
+        """Tutup titik hidrasi kalau sedang buka, atau buka kalau sedang tutup (skenario proposal)."""
         self.closed ^= {name}
         self.min_message = None
         self.refresh()
 
     def open_all(self):
+        """Buka kembali semua titik hidrasi."""
         self.closed.clear()
         self.min_message = None
         self.refresh()
 
     # --- Pelari ---
     def reset_runner(self):
-        self.runner = Runner(self.data.G, self.origin)
+        """Kembalikan pelari ke titik awal dan hapus jejaknya."""
+        self.runner = Runner(self.data.network, self.origin)
         self.calculated, self.hit = False, None
         self.trail, self.arrived, self.reroute = self.runner.trail(), False, None
         self.tracked_at = self.runner.position
         self.update_trail()
 
     def track_runner(self):
+        """Catat jejak pelari tiap TRAIL_STEP_M meter dan cek apakah sudah sampai tujuan."""
         position = self.runner.position
         if self.arrived or math.dist(position, self.tracked_at) < TRAIL_STEP_M:
             return
         self.tracked_at = position
         self.trail = self.runner.trail()
-        target = self.data.G.nodes[self.target]
-        self.arrived = math.dist(position, (target["x"], target["y"])) <= ARRIVE_M
+        self.arrived = math.dist(position, self.data.network.xy(self.target)) <= ARRIVE_M
         self.update_trail()
 
     def update_trail(self):
+        """Cek apakah pelari keluar rute anjuran. Kalau ya, buat rute baru dari posisinya dan hitung statistiknya."""
         planned = self.comparison.safe if self.comparison.safe is not None else self.comparison.baseline
         samples = shapely.get_coordinates(shapely.segmentize(LineString(self.trail), TRAIL_STEP_M)) if len(self.trail) > 1 else []
         off_route = len(samples) > 0 and shapely.distance(shapely.points(samples), planned).max() > OFF_ROUTE_M
         self.reroute = None
         if off_route and not self.arrived:
             runner = self.runner
-            self.reroute = analysis.reroute(self.data, self.scene, self.to_target, runner.u, runner.v, runner.s)
-        line = analysis.join(self.trail, list(self.reroute.line.coords)) if self.reroute else self.trail
-        self.trail_stats = analysis.route_stats(LineString(line), self.scene.points) if off_route else None
+            self.reroute = self.planner.reroute(self.scene, self.to_target, runner.u, runner.v, runner.s)
+        line = join(self.trail, list(self.reroute.line.coords)) if self.reroute else self.trail
+        self.trail_stats = self.planner.stats(LineString(line), self.scene.points) if off_route else None
 
     def calculate(self):
+        """Tombol Hitung: cari titik hidrasi terdekat lewat jalan dari posisi pelari."""
         self.calculated = True
         runner = self.runner
-        self.hit = analysis.next_hydration(self.data, self.scene.points, runner.u, runner.v, runner.s)
+        self.hit = self.planner.next_hydration(self.scene.points, runner.u, runner.v, runner.s)
 
     def point_at(self, pos):
+        """Nama titik hidrasi yang ada di bawah posisi mouse `pos`, atau None."""
         if not self.map_rect.collidepoint(pos):
             return None
         for name, geom in zip(self.data.points["name"], self.data.points.geometry):
@@ -150,6 +168,7 @@ class App:
 
     # --- Input ---
     def handle(self, event):
+        """Terima satu event pygame. False kalau program harus berhenti."""
         if event.type == pygame.QUIT:
             return False
         if event.type == pygame.KEYDOWN:
@@ -165,6 +184,7 @@ class App:
         return True
 
     def on_key(self, key):
+        """Tombol keyboard: H hitung, R reset pelari, 0 reset zoom, F1 atau / bantuan, Esc keluar."""
         if self.panel.help_open:
             self.panel.help_open = False
         elif key == pygame.K_ESCAPE:
@@ -181,12 +201,14 @@ class App:
         return True
 
     def on_press(self, pos):
+        """Mouse ditekan: diteruskan ke panel, atau mulai geser peta."""
         if self.panel.help_open:
             self.panel.help_open = False
         elif not self.panel.click(pos) and self.map_rect.collidepoint(pos):
             self.drag = {"start": pos, "moved": False}
 
     def on_drag(self, event):
+        """Geser peta mengikuti mouse (setelah bergerak lebih dari DRAG_MIN_PX)."""
         if not self.drag["moved"] and math.dist(event.pos, self.drag["start"]) < DRAG_MIN_PX:
             return
         self.drag["moved"] = True
@@ -194,6 +216,7 @@ class App:
         self.base_dirty = True
 
     def on_release(self, pos):
+        """Mouse dilepas tanpa menggeser: kalau mengenai titik hidrasi, titik itu ditutup/dibuka."""
         drag, self.drag = self.drag, None
         if drag and not drag["moved"]:
             name = self.point_at(pos)
@@ -201,6 +224,7 @@ class App:
                 self.toggle_point(name)
 
     def on_wheel(self, notches):
+        """Scroll mouse di atas peta: zoom in/out."""
         mouse = pygame.mouse.get_pos()
         if self.map_rect.collidepoint(mouse):
             self.view.zoom_at(mouse, ZOOM_PER_NOTCH ** notches)
@@ -208,6 +232,7 @@ class App:
 
     # --- Update dan gambar ---
     def update(self, dt):
+        """Dipanggil tiap frame: gerakkan pelari sesuai tombol W/A/S/D yang sedang ditekan."""
         pressed = pygame.key.get_pressed()
         dx = sum(vector[0] for key, vector in MOVE_KEYS.items() if pressed[key])
         dy = sum(vector[1] for key, vector in MOVE_KEYS.items() if pressed[key])
@@ -217,12 +242,14 @@ class App:
             self.follow_runner()
 
     def follow_runner(self):
+        """Geser peta kalau pelari mendekati tepi layar, supaya tetap terlihat."""
         x, y = self.view.to_screen(*self.runner.position)
         if not self.map_rect.inflate(-2 * FOLLOW_MARGIN_PX, -2 * FOLLOW_MARGIN_PX).collidepoint(x, y):
             self.view.pan(self.map_rect.centerx - x, self.map_rect.centery - y)
             self.base_dirty = True
 
     def draw(self):
+        """Gambar satu frame: peta dasar, rute, titik, pelari, tooltip, lalu panel."""
         if self.base_dirty:
             draw_base(self.base, self.view, self.data, self.scene, self.fonts["small"])
             self.base_dirty = False
@@ -248,6 +275,7 @@ class App:
         pygame.display.flip()
 
     def draw_tooltip(self, mouse):
+        """Kotak kecil berisi nama, jenis, dan status buka/tutup saat mouse di atas titik hidrasi."""
         name = self.point_at(mouse)
         if name is None:
             return
@@ -258,6 +286,7 @@ class App:
         self.screen.blit(label, rect)
 
     def run(self):
+        """Loop utama: baca input, update, gambar, ulangi 60 kali per detik sampai jendela ditutup."""
         clock = pygame.time.Clock()
         running = True
         while running:

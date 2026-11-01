@@ -1,3 +1,4 @@
+"""Semua urusan menggambar peta: kamera, jalan, zona, rute, ikon titik hidrasi, dan label nama."""
 import math
 
 import pygame
@@ -41,6 +42,7 @@ ROAD_STYLES = {"Jl. raya": (4, 8, False), "Jl. perumahan": (2, 5, False), "Setap
 
 
 def text(surface, font, value, pos, color=COLORS["text"], anchor="topleft"):
+    """Tulis teks di layar. `anchor` menentukan titik mana dari teks yang ditaruh di `pos`."""
     rendered = font.render(value, True, color)
     rect = rendered.get_rect(**{anchor: pos})
     surface.blit(rendered, rect)
@@ -48,12 +50,16 @@ def text(surface, font, value, pos, color=COLORS["text"], anchor="topleft"):
 
 
 def parts(geom):
+    """Pecah geometri gabungan (Multi...) jadi daftar bagian-bagiannya."""
     return list(getattr(geom, "geoms", [geom]))
 
 
 # --- Transformasi koordinat meter (UTM) ke layar, dengan zoom dan geser ---
 class MapView:
+    """Kamera peta: mengubah koordinat meter (UTM) jadi piksel layar, lengkap dengan zoom dan geser."""
+
     def __init__(self, rect, bounds, padding=24):
+        """Atur kamera supaya seluruh peta (bounds) muat di dalam kotak `rect`."""
         min_x, min_y, max_x, max_y = bounds
         self.rect = rect
         self.fit_scale = min((rect.w - 2 * padding) / (max_x - min_x), (rect.h - 2 * padding) / (max_y - min_y))
@@ -64,10 +70,12 @@ class MapView:
         self.reset()
 
     def reset(self):
+        """Kembalikan zoom dan posisi ke tampilan awal."""
         self.scale = self.fit_scale
         self.offset_x, self.offset_y = self.fit_offset
 
     def zoom_at(self, pos, factor):
+        """Zoom sebesar `factor` dengan titik `pos` (posisi mouse) tetap di tempatnya."""
         scale = min(max(self.scale * factor, self.fit_scale * MIN_ZOOM), self.fit_scale * MAX_ZOOM)
         ratio = scale / self.scale
         self.offset_x = pos[0] + (self.offset_x - pos[0]) * ratio
@@ -75,30 +83,37 @@ class MapView:
         self.scale = scale
 
     def pan(self, dx, dy):
+        """Geser peta sejauh (dx, dy) piksel."""
         self.offset_x += dx
         self.offset_y += dy
 
     def to_screen(self, x, y):
+        """Koordinat meter -> piksel layar."""
         return self.offset_x + x * self.scale, self.offset_y - y * self.scale
 
     def path(self, line):
+        """Garis (LineString) -> daftar titik piksel."""
         return [self.to_screen(x, y) for x, y in line.coords]
 
     def visible_box(self):
+        """Kotak area peta yang sedang terlihat (dalam meter), untuk melewati objek di luar layar."""
         return box(
             (self.rect.left - self.offset_x) / self.scale, (self.offset_y - self.rect.bottom) / self.scale,
             (self.rect.right - self.offset_x) / self.scale, (self.offset_y - self.rect.top) / self.scale,
         )
 
     def width(self, min_px, width_m):
+        """Lebar garis dalam piksel: mengikuti zoom (width_m meter), tapi tidak lebih tipis dari min_px."""
         return max(min_px, round(width_m * self.scale))
 
     def zoomed_in(self):
+        """True kalau peta sudah cukup di-zoom untuk menampilkan nama toko dan jalan."""
         return self.scale >= self.fit_scale * LABEL_ZOOM
 
 
 # --- Layer statis: zona buffer dan jalan ---
 def draw_zone(surface, view, zone, color, alpha=55):
+    """Gambar zona aman: poligon biru transparan (mode Radius) atau koridor di sepanjang jalan (mode Lewat jalan)."""
     layer = pygame.Surface(surface.get_size(), pygame.SRCALPHA)
     if zone.geom_type == "MultiLineString":
         width = max(ZONE_ROAD_MIN_PX, round(ZONE_ROAD_M * view.scale))
@@ -117,6 +132,7 @@ def draw_zone(surface, view, zone, color, alpha=55):
 
 
 def draw_dashes(surface, color, points, width):
+    """Gambar garis putus-putus."""
     on, left = True, DASH_PX
     for a, b in zip(points[:-1], points[1:]):
         length, start = math.dist(a, b), 0.0
@@ -131,6 +147,7 @@ def draw_dashes(surface, color, points, width):
 
 
 def draw_polyline(surface, points, color, width, dashed=False):
+    """Gambar garis dari daftar titik piksel; ujung-ujungnya dibulatkan kalau garisnya tebal."""
     if dashed:
         draw_dashes(surface, color, points, width)
         return
@@ -141,6 +158,7 @@ def draw_polyline(surface, points, color, width, dashed=False):
 
 
 def draw_line(surface, view, line, color, width, dashed=False):
+    """Gambar garis dari geometri Shapely (bisa terdiri dari beberapa bagian)."""
     for part in parts(line):
         points = view.path(part)
         if len(points) >= 2:
@@ -148,6 +166,7 @@ def draw_line(surface, view, line, color, width, dashed=False):
 
 
 def draw_scale_bar(surface, view, font):
+    """Gambar skala jarak di pojok kiri bawah peta."""
     meters = max((m for m in SCALE_STEPS_M if m * view.scale <= SCALE_BAR_MAX_PX), default=SCALE_STEPS_M[0])
     x, y = view.rect.x + 20, view.rect.bottom - 20
     length = meters * view.scale
@@ -156,6 +175,7 @@ def draw_scale_bar(surface, view, font):
 
 
 def draw_base(surface, view, data, scene, font):
+    """Gambar lapisan dasar yang jarang berubah: latar, zona, semua jalan (jalan aman lebih gelap), dan nama jalan."""
     surface.fill(COLORS["background"])
     draw_zone(surface, view, scene.zone, COLORS["zone"])
     area = view.visible_box()
@@ -177,6 +197,7 @@ def draw_base(surface, view, data, scene, font):
 
 
 def draw_road_names(surface, view, edges, font):
+    """Tulis nama jalan di tengah ruas, miring mengikuti jalan, tanpa saling menimpa."""
     placed, by_name = [], {}
     named = edges[edges["road_name"].notna()]
     for name, line in sorted(zip(named["road_name"], named.geometry), key=lambda row: -row[1].length):
@@ -202,6 +223,7 @@ def draw_road_names(surface, view, edges, font):
 
 # --- Rute dengan panah arah ---
 def draw_arrow(surface, view, line, distance, color, size=8):
+    """Gambar satu panah arah di titik `distance` meter sepanjang rute."""
     center = view.to_screen(*line.interpolate(distance).coords[0])
     ahead = view.to_screen(*line.interpolate(distance + 3).coords[0])
     ux, uy = unit(ahead[0] - center[0], ahead[1] - center[1])
@@ -214,6 +236,7 @@ def draw_arrow(surface, view, line, distance, color, size=8):
 
 
 def draw_route(surface, view, line, color, width, dashed=False):
+    """Gambar rute beserta panah arah di sepanjang garisnya."""
     draw_line(surface, view, line, color, width, dashed)
     distance = ARROW_EVERY_M / 2
     while distance < line.length - 3:
@@ -223,6 +246,7 @@ def draw_route(surface, view, line, color, width, dashed=False):
 
 # --- Titik: hidrasi, landmark, pelari ---
 def draw_icon(surface, kind, center, radius):
+    """Gambar ikon titik hidrasi: lingkaran berwarna dengan gambar gelas/keranjang, atau tanda X kalau ditutup."""
     x, y = center
     s, white = radius * 0.45, COLORS["white"]
     pygame.draw.circle(surface, COLORS[kind], center, radius)
@@ -239,6 +263,7 @@ def draw_icon(surface, kind, center, radius):
 
 
 def draw_points(surface, view, points, closed, font, highlight=None):
+    """Gambar semua titik hidrasi (dan namanya kalau peta di-zoom). `highlight` diberi lingkaran penanda."""
     placed = []
     for name, kind, geom in zip(points["name"], points["kind"], points.geometry):
         x, y = view.to_screen(geom.x, geom.y)
@@ -250,6 +275,7 @@ def draw_points(surface, view, points, closed, font, highlight=None):
 
 
 def draw_label(surface, font, value, pos, color, placed=None):
+    """Gambar label bernama di atas kotak putih. Dilewati kalau menimpa label lain di `placed`."""
     label = font.render(value, True, color)
     rect = label.get_rect(midleft=pos)
     if placed is not None:
@@ -261,6 +287,7 @@ def draw_label(surface, font, value, pos, color, placed=None):
 
 
 def draw_landmarks(surface, view, landmarks, start, end, font, bold_font):
+    """Gambar landmark. Titik awal dan akhir ditandai khusus dan diberi label tebal."""
     for name, geom in zip(landmarks["name"], landmarks.geometry):
         x, y = view.to_screen(geom.x, geom.y)
         if name in (start, end):
@@ -275,6 +302,7 @@ def draw_landmarks(surface, view, landmarks, start, end, font, bold_font):
 
 
 def draw_runner(surface, view, position):
+    """Gambar pelari (titik biru)."""
     x, y = view.to_screen(*position)
     pygame.draw.circle(surface, COLORS["runner"], (x, y), 8)
     pygame.draw.circle(surface, COLORS["white"], (x, y), 8, 3)

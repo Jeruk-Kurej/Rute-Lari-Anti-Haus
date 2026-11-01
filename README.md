@@ -28,4 +28,19 @@ Kalau pelari keluar dari rute anjuran, jejaknya muncul (magenta putus-putus) dan
 
 Tombol "Zona" mengganti cara ukur toleransi: Radius (buffer lingkaran) atau Lewat jalan (jarak menyusuri jalan dari titik hidrasi). Saat peta di-zoom, nama titik hidrasi dan nama jalan ikut ditampilkan.
 
+## Struktur kode (`afl2_rute/`)
+
+| File | Isi |
+|---|---|
+| `config.py` | Semua pengaturan: CRS, landmark, jenis jalan, titik hidrasi manual, toleransi |
+| `data.py` | Muat data OSM/cache; toko dan landmark dijadikan node di ruas jalan terdekat |
+| `network.py` | Kelas `RoadNetwork`: graph jalan, memecah ruas, node sementara untuk jarak terdekat |
+| `zones.py` | Kelas `Zone` dengan turunan `RadiusZone` (buffer) dan `RoadZone` (lewat jalan) |
+| `analysis.py` | Kelas `RoutePlanner`: rute terpendek vs anti-haus, rute ulang, titik hidrasi terdekat |
+| `runner.py` | Kelas `Runner`: pelari virtual W/A/S/D |
+| `render.py`, `widgets.py` | Menggambar peta, tombol, dan dropdown |
+| `panel.py`, `game.py`, `main.py` | Panel kanan, aplikasi utama, dan pintu masuk |
+
+Menambah jenis zona baru: buat kelas turunan `Zone` di `zones.py` dengan method `build()`, lalu daftarkan namanya di `ZONE_MODES` (config) dan `ZONES` (zones).
+
 Data OSM sudah ada di `afl2_rute/cache/`, jadi tidak perlu internet. Hapus folder itu jika landmark/titik hidrasi di `afl2_rute/config.py` diubah.
