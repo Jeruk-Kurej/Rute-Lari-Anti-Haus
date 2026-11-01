@@ -33,7 +33,7 @@ Tombol "Zona" mengganti cara ukur toleransi: Radius (buffer lingkaran) atau Lewa
 | File | Isi |
 |---|---|
 | `config.py` | Semua pengaturan: CRS, landmark, jenis jalan, titik hidrasi manual, toleransi |
-| `data.py` | Muat data OSM/cache; toko dan landmark dijadikan node di ruas jalan terdekat |
+| `data.py` | Muat data OSM/cache; toko dan landmark dijadikan node di ruas jalan terdekat; bangunan (polygon) dimuat untuk tampilan |
 | `network.py` | Kelas `RoadNetwork`: graph jalan, memecah ruas, node sementara untuk jarak terdekat |
 | `zones.py` | Kelas `Zone` dengan turunan `RadiusZone` (buffer) dan `RoadZone` (lewat jalan) |
 | `analysis.py` | Kelas `RoutePlanner`: rute terpendek vs anti-haus, rute ulang, titik hidrasi terdekat |
@@ -43,4 +43,4 @@ Tombol "Zona" mengganti cara ukur toleransi: Radius (buffer lingkaran) atau Lewa
 
 Menambah jenis zona baru: buat kelas turunan `Zone` di `zones.py` dengan method `build()`, lalu daftarkan namanya di `ZONE_MODES` (config) dan `ZONES` (zones).
 
-Data OSM sudah ada di `afl2_rute/cache/`, jadi tidak perlu internet. Hapus folder itu jika landmark/titik hidrasi di `afl2_rute/config.py` diubah.
+Data OSM sudah ada di `afl2_rute/cache/`, jadi tidak perlu internet. Bangunan (`bangunan.gpkg`) hanya hiasan peta dan opsional: tanpa file itu program tetap jalan. Titik hidrasi manual dan landmark berkoordinat `(lat, lon)` yang ditambah di `afl2_rute/config.py` langsung terbaca tanpa menghapus cache.
