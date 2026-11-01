@@ -21,6 +21,7 @@ class Dataset:
     edges: gpd.GeoDataFrame
     points: gpd.GeoDataFrame
     landmarks: gpd.GeoDataFrame
+    buildings: gpd.GeoDataFrame
 
 
 # --- Landmark dan area ---
@@ -36,9 +37,13 @@ def geocode_landmarks(landmarks):
         rows.append({"name": name, "geometry": Point(lon, lat)})
     if missing:
         print(f"Landmark tidak ditemukan di OSM: {missing}. Isi LANDMARKS dengan (lat, lon) dari Google Maps.")
-    if len(rows) < 2:
-        raise ValueError("Butuh minimal 2 landmark.")
-    return gpd.GeoDataFrame(rows, crs=config.SOURCE_CRS)
+    return gpd.GeoDataFrame(rows, geometry="geometry", crs=config.SOURCE_CRS) if rows else None
+
+
+def with_new_landmarks(cached):
+    """Landmark baru di config langsung ikut (tanpa hapus cache). Landmark yang sudah ada di cache dipakai apa adanya."""
+    new = geocode_landmarks({name: query for name, query in config.LANDMARKS.items() if name not in set(cached["name"])})
+    return cached if new is None else pd.concat([cached, new], ignore_index=True)
 
 
 def area_bbox(landmarks, padding_m):
@@ -80,18 +85,52 @@ def without_duplicates(osm, manual):
     return osm[[not d for d in duplicate]]
 
 
-def load_hydration_points(bbox):
-    """Gabungkan titik hidrasi dari OSM dengan titik manual (Google Maps), tanpa duplikat."""
-    parts = [as_points(fetch_features(bbox, {"shop": tag}), kind) for tag, kind in config.OSM_SHOP_KINDS.items()]
-    parts.append(as_points(fetch_features(bbox, config.OSM_DRINK_TAGS), "Kedai minuman"))
-    osm = pd.concat([p for p in parts if not p.empty], ignore_index=True)
-
-    manual = gpd.GeoDataFrame(
-        {"name": list(config.MANUAL_POINTS), "kind": [kind for kind, _ in config.MANUAL_POINTS.values()]},
-        geometry=[Point(lon, lat) for _, (lat, lon) in config.MANUAL_POINTS.values()],
+def manual_points(entries):
+    """Ubah titik manual dari config (nama: (jenis, (lat, lon))) jadi tabel titik dalam satuan meter."""
+    return gpd.GeoDataFrame(
+        {"name": list(entries), "kind": [kind for kind, _ in entries.values()]},
+        geometry=[Point(lon, lat) for _, (lat, lon) in entries.values()],
         crs=config.SOURCE_CRS,
     ).to_crs(config.ANALYSIS_CRS)
+
+
+def merge_manual(osm):
+    """Gabungkan titik OSM dengan titik manual di config (Google Maps), tanpa duplikat."""
+    manual = manual_points(config.MANUAL_POINTS)
     return pd.concat([without_duplicates(osm, manual), manual], ignore_index=True)
+
+
+def load_hydration_points(bbox):
+    """Unduh titik hidrasi dari OSM (minimarket, supermarket, kedai minuman), lalu gabung dengan titik manual."""
+    parts = [as_points(fetch_features(bbox, {"shop": tag}), kind) for tag, kind in config.OSM_SHOP_KINDS.items()]
+    parts.append(as_points(fetch_features(bbox, config.OSM_DRINK_TAGS), "Kedai minuman"))
+    return merge_manual(pd.concat([p for p in parts if not p.empty], ignore_index=True))
+
+
+def refresh_manual_points(cached):
+    """Titik manual di cache diganti dengan yang ada di config sekarang, jadi menambah/mengubah titik cukup edit config."""
+    return merge_manual(cached[~cached["name"].isin(config.MANUAL_POINTS)])
+
+
+# --- Bangunan (layer polygon, hanya untuk tampilan) ---
+def polygons_only(raw):
+    """Ambil hanya bentuk poligon dari hasil unduhan OSM, dan pecah MultiPolygon jadi poligon tunggal."""
+    layer = raw[["geometry"]].copy()
+    layer["name"] = raw["name"] if "name" in raw else None
+    layer = layer[layer.geom_type.isin(["Polygon", "MultiPolygon"])]
+    return layer.explode(index_parts=False).reset_index(drop=True)
+
+
+def load_buildings(bbox):
+    """Unduh semua bangunan (tag OSM building) di dalam bbox sebagai poligon."""
+    return polygons_only(fetch_features(bbox, {"building": True}))
+
+
+def read_buildings(file):
+    """Baca bangunan dari cache. Kalau file-nya tidak ada, hasilnya kosong: program tetap jalan tanpa bangunan."""
+    if not file.exists():
+        return gpd.GeoDataFrame({"name": []}, geometry=[], crs=config.SOURCE_CRS)
+    return gpd.read_file(file)
 
 
 # --- Nama: kelas jalan, nama jalan, nama titik ---
@@ -125,7 +164,7 @@ def unique_names(points, edges):
 
 
 # --- Dataset ---
-def build_dataset(G, points, landmarks):
+def build_dataset(G, points, landmarks, buildings):
     """Siapkan semua data untuk analisis.
 
     Langkah penting: setiap toko dan landmark dijadikan node di ruas jalan terdekatnya
@@ -134,6 +173,7 @@ def build_dataset(G, points, landmarks):
     network = RoadNetwork(G)
     points = points.to_crs(config.ANALYSIS_CRS).reset_index(drop=True)
     landmarks = landmarks.to_crs(config.ANALYSIS_CRS)
+    buildings = buildings.to_crs(config.ANALYSIS_CRS)
     attached = network.attach(list(points.geometry) + list(landmarks.geometry))
     points["node"], points["offset_m"] = zip(*attached[:len(points)])
     landmarks["node"] = [node for node, _ in attached[len(points):]]
@@ -141,7 +181,7 @@ def build_dataset(G, points, landmarks):
     nodes, edges = ox.convert.graph_to_gdfs(network.G)
     edges["road_class"] = edges["highway"].map(road_class)
     edges["road_name"] = edges["name"].map(road_name)
-    return Dataset(network, nodes, edges, unique_names(points, edges), landmarks)
+    return Dataset(network, nodes, edges, unique_names(points, edges), landmarks, buildings)
 
 
 def load_dataset():
@@ -149,16 +189,23 @@ def load_dataset():
     graph_file = config.CACHE_DIR / "jalan.graphml"
     points_file = config.CACHE_DIR / "titik_hidrasi.gpkg"
     landmarks_file = config.CACHE_DIR / "landmark.gpkg"
+    buildings_file = config.CACHE_DIR / "bangunan.gpkg"
     if graph_file.exists() and points_file.exists() and landmarks_file.exists():
-        return build_dataset(ox.io.load_graphml(graph_file), gpd.read_file(points_file), gpd.read_file(landmarks_file))
+        points = refresh_manual_points(gpd.read_file(points_file))
+        landmarks = with_new_landmarks(gpd.read_file(landmarks_file))
+        return build_dataset(ox.io.load_graphml(graph_file), points, landmarks, read_buildings(buildings_file))
 
     landmarks = geocode_landmarks(config.LANDMARKS)
+    if landmarks is None or len(landmarks) < 2:
+        raise ValueError("Butuh minimal 2 landmark.")
     bbox = area_bbox(landmarks, config.AREA_PADDING_M)
     G = ox.projection.project_graph(ox.graph.graph_from_bbox(bbox, network_type="walk"), to_crs=config.ANALYSIS_CRS)
     points = load_hydration_points(bbox)
+    buildings = load_buildings(bbox)
 
     config.CACHE_DIR.mkdir(exist_ok=True)
     ox.io.save_graphml(G, graph_file)
     points.to_file(points_file, driver="GPKG")
     landmarks.to_file(landmarks_file, driver="GPKG")
-    return build_dataset(G, points, landmarks)
+    buildings.to_file(buildings_file, driver="GPKG")
+    return build_dataset(G, points, landmarks, buildings)

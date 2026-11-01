@@ -5,7 +5,7 @@ from pathlib import Path
 SOURCE_CRS = "EPSG:4326"
 ANALYSIS_CRS = "EPSG:32749"  # UTM 49S, satuan meter
 
-# --- Cache (hapus folder ini setiap LANDMARKS atau titik hidrasi diubah) ---
+# --- Cache (data OSM hasil unduhan; jangan dihapus, titik/landmark baru di bawah tetap terbaca) ---
 CACHE_DIR = Path(__file__).resolve().parent / "cache"
 
 # --- Landmark: kata kunci pencarian OSM, atau (lat, lon) dari Google Maps ---
