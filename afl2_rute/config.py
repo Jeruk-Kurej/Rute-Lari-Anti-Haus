@@ -1,3 +1,4 @@
+"""Semua pengaturan program di satu tempat: CRS, landmark, jenis jalan, titik hidrasi, dan toleransi."""
 from pathlib import Path
 
 # --- CRS ---
