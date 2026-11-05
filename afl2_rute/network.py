@@ -2,7 +2,6 @@
 from contextlib import contextmanager
 
 import networkx as nx
-import osmnx as ox
 from shapely.geometry import LineString, Point
 from shapely.ops import substring
 
@@ -24,6 +23,7 @@ class RoadNetwork:
     def __init__(self, G):
         self.G = G
         self.next_id = max(G.nodes) + 1  # nomor untuk node baru
+        self.removed, self.added = [], []  # ruas yang dihapus/ditambah oleh attach() terakhir (untuk menyamakan tabel ruas)
 
     # --- Membaca graph ---
     def xy(self, node):
@@ -77,16 +77,19 @@ class RoadNetwork:
             self.G.remove_node(SOURCE_NODE)
 
     # --- Menambah node di tengah ruas ---
-    def attach(self, points):
-        """Jadikan tiap titik (toko, landmark) sebuah node tepat di ruas jalan terdekatnya.
+    def attach(self, points, edges):
+        """Jadikan tiap titik (toko, landmark, tempat pilihan) sebuah node tepat di ruas jalan terdekatnya.
 
-        Ruas yang dilalui dipecah jadi dua (atau lebih) potongan, jadi jarak dari kedua ujung
-        ruas dihitung benar. Hasilnya daftar (node, jarak_titik_ke_node), urut sesuai input.
+        Ruas terdekat dicari lewat spatial index tabel `edges`, lalu dipecah jadi dua (atau lebih)
+        potongan, jadi jarak dari kedua ujung ruas dihitung benar. Hasilnya daftar
+        (node, jarak_titik_ke_node), urut sesuai input. Ruas yang berubah dicatat di removed/added.
         """
-        edges = ox.convert.graph_to_gdfs(self.G, nodes=False)
+        self.removed, self.added = [], []
         hits = {}  # ruas -> daftar (posisi sepanjang ruas, nomor titik)
-        for index, point in enumerate(points):
-            u, v, key = edges.distance(point).idxmin()
+        found, nearest = edges.sindex.nearest(points, return_all=False)
+        for index, row in zip(found, nearest):
+            point = points[index]
+            u, v, key = edges.index[row]
             line = self.exact_line(u, v, key)
             s = line.project(point)
             twin = self.twin_key(u, v, key)
@@ -139,8 +142,10 @@ class RoadNetwork:
         twin = self.twin_key(u, v, key)
         twin_attrs = dict(self.G.edges[v, u, twin]) if twin is not None else None
         self.G.remove_edge(u, v, key)
+        self.removed.append((u, v, key))
         if twin is not None:
             self.G.remove_edge(v, u, twin)
+            self.removed.append((v, u, twin))
 
         ends = [u, *(node for _, node in stops), v]
         positions = [0.0, *(s for s, _ in stops), line.length]
@@ -153,4 +158,5 @@ class RoadNetwork:
     def add_piece(self, a, b, piece, attrs, whole_length):
         """Pasang satu potongan ruas a-b. Panjangnya dibagi sebanding, jadi total panjang jalan tetap sama."""
         meters = attrs["length"] * piece.length / whole_length
-        self.G.add_edge(a, b, **{**attrs, "geometry": piece, "length": meters})
+        key = self.G.add_edge(a, b, **{**attrs, "geometry": piece, "length": meters})
+        self.added.append((a, b, key))

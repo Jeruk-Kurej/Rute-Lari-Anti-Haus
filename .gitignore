@@ -5,3 +5,4 @@ afl2_rute/cache/http/
 *.zip
 *.pdf
 *.ipynb
+.venv/
