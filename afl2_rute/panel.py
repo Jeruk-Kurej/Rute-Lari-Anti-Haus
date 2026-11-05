@@ -1,38 +1,32 @@
-"""Panel kanan: kartu input, tabel hasil, skenario, demo pelari, legenda, dan bantuan."""
+"""Panel kiri: isian rute (dari, lewat, ke), jarak maksimal ke tempat minum, ringkasan hasil, daftar tempat minum,
+simulasi lari, kontrol peta, dan layar cara pakai. Semua teks memakai bahasa sehari-hari, bukan istilah teknis."""
 import pygame
 
-from .render import COLORS, ROAD_STYLES, draw_icon, draw_polyline, text
-from .widgets import Button, Dropdown
+from . import config
+from .render import COLORS, draw_icon, draw_map_legend, draw_marker, draw_polyline, stop_marks, text
+from .widgets import BORDER, HOVER, Button, TextInput
 
-CARD = (244, 246, 248)
-ACCENT = (30, 142, 90)
-LEGEND = [
-    ("zone", "zone", "Zona buffer"),
-    ("building", "building", "Bangunan"),
-    ("line", "safe_road", "Jalan dalam zona"),
-    ("line", "road", "Jalan luar zona"),
-    *(("road", name, name) for name in ROAD_STYLES),
-    ("line", "baseline", "Rute terpendek"),
-    ("line", "safe", "Rute anti-haus"),
-    ("dash", "trail", "Jejak pelari"),
-    ("line", "reroute", "Rute baru"),
-    ("line", "hydration_path", "Ke titik hidrasi"),
-    ("icon", "Minimarket", "Minimarket"),
-    ("icon", "Supermarket", "Supermarket"),
-    ("icon", "Kedai minuman", "Kedai minuman"),
-    ("icon", "closed", "Titik ditutup"),
-]
-LEGEND_ROW_PX = 18
+ACTIVE = (224, 238, 248)
+PAD = 24
+ROW_PX = 42
+FIELD_H = 36
+RESULT_PX = 44
+LIST_PX = 26
 HELP_STEPS = [
-    "Pilih titik awal dan titik akhir di kartu \"1. Atur rute\".",
-    "Atur toleransi: jarak maksimal rute ke titik hidrasi terdekat. Kalau rute anti-haus tidak ada, klik \"Cari toleransi minimum\".",
-    "Bandingkan rute oranye (terpendek) dengan rute hijau (anti-haus) di peta. Kartu \"2. Hasil\" menampilkan panjang, selisih, dan jarak terjauh ke titik hidrasi.",
-    "Skenario: klik sebuah titik hidrasi di peta untuk menutupnya (misal tokonya tutup). Klik lagi untuk membukanya.",
-    "Demo pelari: gerakkan titik biru dengan W/A/S/D, tekan H atau tombol Hitung untuk jarak lewat jalan ke titik hidrasi terdekat, R untuk reset.",
-    "Kalau pelari keluar dari rute anjuran, jejaknya (magenta putus-putus) dan rute baru dari posisinya (kuning) muncul, lalu ikut dibandingkan di tabel Hasil.",
-    "Tambahan: tombol \"Zona\" mengganti cara ukur toleransi, Radius (buffer) atau Lewat jalan.",
-    "Peta: scroll untuk zoom, drag untuk geser, 0 untuk reset. Nama toko dan jalan muncul saat di-zoom. Legenda ada di pojok kanan bawah peta.",
+    ("Tentukan rute", "Klik kotak \"Dari\" dan \"Ke\", ketik nama tempat (kampus, mal, taman, atau nama jalan), lalu pilih hasilnya. Mau mampir dulu? Klik \"Tambah tempat singgah\"."),
+    ("Atur jarak ke tempat minum", "Pilih seberapa jauh kamu boleh berada dari minimarket atau kedai minuman. Makin kecil, makin aman, tapi rutenya bisa lebih panjang."),
+    ("Ikuti rute biru", "Garis biru selalu lewat jalan yang dekat tempat minum, garis oranye adalah rute tercepat sebagai pembanding. Toko tutup? Klik ikonnya di peta. Mau mencoba berlari? Klik \"Coba lari (simulasi)\"."),
 ]
+HOW_IT_WORKS = ("Cara kerjanya: setiap tempat minum diberi lingkaran sejauh jarak pilihanmu (buffer), semua lingkaran digabung "
+                "(union), lalu hanya jalan yang seluruhnya di dalam gabungan itu yang boleh dilewati (within). Rute terpendek "
+                "di jalan-jalan itu dicari dengan algoritma Dijkstra.")
+SIMULATION_HINT = "Gerakkan titik ungu dengan tombol W A S D. Tekan R untuk mulai ulang dari titik A."
+ZONE_NAMES = {"Radius": "Garis lurus", "Lewat jalan": "Lewat jalan"}
+ZONE_HINTS = {
+    "Radius": "Jarak udara dari toko (lingkaran). Cepat dihitung, tapi jalan di seberang sungai atau pagar bisa dianggap dekat.",
+    "Lewat jalan": "Jarak berjalan kaki menyusuri jalan sampai toko. Lebih realistis, biasanya butuh jarak lebih besar.",
+}
+DIM = (120, 128, 132)  # pengali warna untuk meredupkan layar di belakang kartu cara pakai
 
 
 def meters(value):
@@ -40,20 +34,14 @@ def meters(value):
     return "-" if value is None else f"{value:,.0f} m".replace(",", ".")
 
 
-def signed(value):
-    """Seperti meters(), tapi dengan tanda + atau -, untuk selisih panjang."""
-    return "-" if value is None else ("+" if value >= 0 else "−") + meters(abs(value))
+def kilometers(value):
+    """Format jarak jadi km dengan satu desimal, misal 1250 -> "1,3 km"."""
+    return f"{value / 1000:.1f} km".replace(".", ",")
 
 
-def trail_note(app):
-    """Catatan di bawah tabel hasil yang menjelaskan asal rute pelari."""
-    if app.arrived:
-        return "Rute pelari = jejak sampai titik akhir."
-    if app.reroute is None:
-        return "Tidak ada rute anti-haus dari posisi pelari."
-    if app.reroute.via_outside:
-        return "Rute pelari = jejak + kembali ke zona + rute baru."
-    return "Rute pelari = jejak + rute baru (kuning)."
+def distance_text(value):
+    """Jarak yang enak dibaca: di bawah 1 km dalam meter, di atasnya dalam km."""
+    return meters(value) if value < 1000 else kilometers(value)
 
 
 def wrap(font, value, width):
@@ -68,216 +56,398 @@ def wrap(font, value, width):
     return lines
 
 
-# --- Panel samping: kartu bernomor sesuai alur proposal ---
+def fit(font, value, width):
+    """Potong teks dengan "..." kalau lebih lebar dari `width` piksel."""
+    if font.size(value)[0] <= width:
+        return value
+    while value and font.size(value + "...")[0] > width:
+        value = value[:-1]
+    return value + "..."
+
+
+def paragraph(surface, font, value, pos, width, color=COLORS["text"], line_px=None):
+    """Tulis teks beberapa baris (dipecah otomatis). Hasilnya posisi y di bawah baris terakhir."""
+    x, y = pos
+    step = line_px or font.get_linesize()
+    for line in wrap(font, value, width):
+        text(surface, font, line, (x, y), color)
+        y += step
+    return y
+
+
+# --- Panel ---
 class Panel:
-    """Panel kanan: kartu bernomor sesuai alur proposal (atur rute, hasil, skenario, demo pelari, tambahan)."""
+    """Panel kiri. Posisi isinya dihitung ulang tiap frame (layout), karena jumlah stop dan ukuran jendela bisa berubah."""
 
     def __init__(self, app, rect, fonts):
-        """Susun posisi semua dropdown dan tombol di panel."""
         self.app, self.rect, self.fonts = app, rect, fonts
-        self.help_open, self.legend_open = True, False
-        self.x, self.width = rect.x + 20, rect.w - 40
-        self.ix, self.iw = self.x + 12, self.width - 24
-        right, field_x, field_w = self.ix + self.iw, self.ix + 90, self.iw - 90
-        self.dropdowns = [
-            Dropdown(pygame.Rect(field_x, 104, field_w, 28), lambda: app.names, lambda: app.start, lambda n: app.select("start", n)),
-            Dropdown(pygame.Rect(field_x, 138, field_w, 28), lambda: app.names, lambda: app.end, lambda n: app.select("end", n)),
-        ]
-        area = app.map_rect
-        self.buttons = [
-            Button(pygame.Rect(field_x, 172, 30, 28), "-", lambda: app.change_tolerance(-1)),
-            Button(pygame.Rect(right - 30, 172, 30, 28), "+", lambda: app.change_tolerance(1)),
-            Button(pygame.Rect(self.ix, 208, self.iw, 28), "Cari toleransi minimum", app.find_minimum_tolerance),
-            Button(pygame.Rect(right - 150, 530, 150, 26), "Buka kembali semua", app.open_all, lambda: bool(app.closed)),
-            Button(pygame.Rect(self.ix, 610, self.iw, 30), "Hitung jarak ke titik hidrasi (H)", app.calculate),
-            Button(pygame.Rect(self.ix + 96, 706, self.iw - 96, 28), lambda: f"Zona: {app.zone_mode}", app.toggle_zone_mode),
-            Button(pygame.Rect(self.x + self.width - 84, 18, 84, 26), "? Bantuan", self.show_help),
-            Button(pygame.Rect(area.right - 136, area.bottom - 44, 120, 28), self.legend_label, self.toggle_legend),
-        ]
+        self.help_open = True
+        self.search = TextInput(pygame.Rect(0, 0, 10, FIELD_H), app.search_hint, app.on_search, app.submit_search)
+        self.layout()
 
     def show_help(self):
-        """Buka layar bantuan."""
+        """Buka layar cara pakai."""
         self.help_open = True
 
-    def toggle_legend(self):
-        """Buka/tutup kotak legenda di peta."""
-        self.legend_open = not self.legend_open
+    def focus_row(self, index):
+        """Klik kotak isian sebuah baris: baris itu aktif dan siap diketik (langsung muncul tempat favorit)."""
+        self.app.set_active(index)
+        self.search.focused = True
+        self.search.set("")
 
-    def legend_label(self):
-        """Teks tombol legenda: "Legenda" atau "Tutup legenda"."""
-        return "Tutup legenda" if self.legend_open else "Legenda"
+    # --- Tata letak ---
+    def layout(self):
+        """Hitung posisi semua bagian panel dan tombol peta berdasarkan kondisi aplikasi sekarang."""
+        app = self.app
+        self.x, self.width = self.rect.x + PAD, self.rect.w - 2 * PAD
+        x, right = self.x, self.x + self.width
+        self.buttons, self.rows, self.nearest_rows = [], [], []
+        self.buttons.append(Button(pygame.Rect(right - 32, 20, 32, 32), "?", self.show_help))
+
+        # 1. Dari, lewat, ke
+        self.route_y = 96
+        y = self.route_y + 32
+        last = len(app.slots) - 1
+        for i in range(len(app.slots)):
+            middle = 0 < i < last
+            field = pygame.Rect(x + 34, y, self.width - 34 - (96 if middle else 0), FIELD_H)
+            self.rows.append((i, (x + 12, y + FIELD_H // 2), field))
+            if middle:
+                for j, (icon, action) in enumerate((("up", lambda i=i: app.move_stop(i, -1)),
+                                                    ("down", lambda i=i: app.move_stop(i, 1)),
+                                                    ("close", lambda i=i: app.remove_stop(i)))):
+                    self.buttons.append(Button(pygame.Rect(field.right + 6 + j * 30, y + 4, 28, 28), "", action, icon=icon))
+            y += ROW_PX
+        if self.search.focused:
+            self.search.rect = next(field for i, _, field in self.rows if i == app.active)
+        body = self.fonts["body"]
+        add_w, loop_w = body.size("Tambah tempat singgah")[0] + 34, body.size("Kembali ke awal")[0] + 34
+        self.buttons += [
+            Button(pygame.Rect(x + 26, y, add_w, 30), "Tambah tempat singgah", app.add_stop,
+                   lambda: last - 1 < config.MAX_STOPS, icon="plus", style="link"),
+            Button(pygame.Rect(right - loop_w, y, loop_w, 30), "Kembali ke awal", app.toggle_loop,
+                   icon=lambda: "check_on" if app.loop else "check_off", style="link"),
+        ]
+
+        # 2. Jarak maksimal ke tempat minum
+        self.limit_y = y + 50
+        self.control_y = self.limit_y + 32
+        self.buttons += [
+            Button(pygame.Rect(x, self.control_y, 36, 36), "", lambda: app.change_tolerance(-1), icon="minus"),
+            Button(pygame.Rect(x + 132, self.control_y, 36, 36), "", lambda: app.change_tolerance(1), icon="plus"),
+            Button(pygame.Rect(right - 176, self.control_y + 3, 176, 30), "Cari jarak terkecil", app.find_minimum_tolerance, style="link"),
+        ]
+
+        # 3. Hasil
+        self.result_y = self.control_y + 36 + 34 + (20 if app.min_message else 0)
+        options = app.comparison.options
+        if options:
+            chips_y = self.result_y + 52 + len(wrap(self.fonts["small"], self.comparison_note(), self.width - 28)) * 18 + 12
+            if len(options) > 1:
+                for i, option in enumerate(options):
+                    self.buttons.append(Button(pygame.Rect(x + 96 + i * 98, chips_y, 92, 30), kilometers(option.line.length),
+                                               lambda i=i: app.choose_option(i)))
+                chips_y += 40
+            self.result_h = chips_y - self.result_y
+        else:
+            lines = len(wrap(self.fonts["small"], app.advice(), self.width - 32))
+            self.result_h = 52 + lines * 18 + (0 if app.needs_input else 46)
+            if not app.needs_input:
+                self.buttons.append(Button(pygame.Rect(x + 16, self.result_y + self.result_h - 48, 220, 34), "Cari jarak terkecil",
+                                           app.find_minimum_tolerance, style="primary"))
+
+        # Bagian bawah: pengaturan ukur jarak, dan tempat yang ditandai tutup
+        self.footer_y = self.rect.bottom - (92 if app.closed else 56)
+        segment = 100
+        for i, mode in enumerate(config.ZONE_MODES):
+            self.buttons.append(Button(pygame.Rect(right - (2 - i) * segment, self.footer_y + 14, segment, 30), ZONE_NAMES[mode],
+                                       lambda mode=mode: app.set_zone_mode(mode), style="segment"))
+        if app.closed:
+            self.buttons.append(Button(pygame.Rect(right - 100, self.footer_y + 52, 100, 30), "Buka semua", app.open_all, style="link"))
+
+        # 4. Tempat minum yang dilewati, atau simulasi lari
+        self.list_y = self.result_y + self.result_h + 22
+        if app.simulating:
+            self.buttons.append(Button(pygame.Rect(right - 80, self.list_y - 4, 80, 28), "Selesai", app.stop_simulation, style="link"))
+            calc_y = self.list_y + 30 + len(wrap(self.fonts["small"], SIMULATION_HINT, self.width)) * 18 + 6
+            self.buttons.append(Button(pygame.Rect(x, calc_y, self.width, 34), "Cari tempat minum terdekat (H)", app.calculate, style="primary"))
+            self.nearest_y = calc_y + 44
+            room = max((self.footer_y - 8 - self.nearest_y) // LIST_PX, 0)
+            for i in range(min(len(app.nearest), room)):
+                self.nearest_rows.append((i, pygame.Rect(x, self.nearest_y + i * LIST_PX, self.width, LIST_PX)))
+        else:
+            self.simulate_y = self.footer_y - 50
+            self.buttons.append(Button(pygame.Rect(x, self.simulate_y, self.width, 36), "Coba lari (simulasi)", app.start_simulation))
+
+        # Tombol di peta: zoom dan kembali ke rute
+        area = app.map_rect
+        controls = (("plus", lambda: app.zoom(1.4)), ("minus", lambda: app.zoom(1 / 1.4)), ("center", app.recenter))
+        for j, (icon, action) in enumerate(controls):
+            self.buttons.append(Button(pygame.Rect(area.right - 52, area.y + 16 + j * 42, 36, 36), "", action, icon=icon))
+
+    def comparison_note(self):
+        """Satu kalimat pembanding: rute tercepat lebih pendek, tapi bisa jauh dari tempat minum."""
+        stats, fastest = self.app.stats.get("Anti-haus"), self.app.stats.get("Baseline")
+        if stats is None or fastest is None:
+            return ""
+        note = f"Rute tercepat {kilometers(fastest.length_m)}, tapi bisa {meters(fastest.farthest_m)} dari tempat minum."
+        extra = stats.length_m - fastest.length_m
+        return note + (f" Rute aman {distance_text(extra)} lebih panjang." if extra > 1 else "")
+
+    # --- Klik ---
+    def results(self):
+        """Hasil pencarian yang sedang tampil (hanya saat sebuah kotak sedang diketik)."""
+        return self.app.results if self.search.focused else []
+
+    def result_rows(self):
+        """Posisi tiap baris hasil pencarian, tepat di bawah kotak yang sedang diketik."""
+        field = self.search.rect
+        top = field.bottom + 4
+        return [(i, pygame.Rect(field.x, top + i * RESULT_PX, self.x + self.width - field.x, RESULT_PX)) for i in range(len(self.results()))]
 
     def click(self, pos):
-        """Proses klik di panel. True kalau klik dipakai panel, False kalau harus diteruskan ke peta."""
-        opened = next((d for d in self.dropdowns if d.open), None)
-        for dropdown in self.dropdowns:
-            dropdown.open = False
-        if opened:
-            item = opened.item_at(pos)
-            if item is not None:
-                opened.on_select(item)
+        """Proses klik di panel atau tombol peta. True kalau klik dipakai, False kalau diteruskan ke peta."""
+        app = self.app
+        for i, row in self.result_rows():
+            if row.collidepoint(pos):
+                app.choose_result(i)
                 return True
-            if opened.rect.collidepoint(pos):
-                return True
-        for dropdown in self.dropdowns:
-            if dropdown.rect.collidepoint(pos):
-                dropdown.open = True
-                return True
+        if self.search.focused and self.search.rect.collidepoint(pos):
+            return True
+        self.search.focused = False
+        self.layout()
         for button in self.buttons:
             if button.hit(pos):
                 button.action()
                 return True
-        return self.legend_open and self.legend_rect().collidepoint(pos)
+        for i, _, field in self.rows:
+            if field.collidepoint(pos) and not (app.loop and i == len(app.slots) - 1):
+                self.focus_row(i)
+                return True
+        for i, row in self.nearest_rows:
+            if row.collidepoint(pos):
+                app.hit = i
+                return True
+        return self.rect.collidepoint(pos)
 
     # --- Gambar ---
-    def card(self, surface, y, h, title, accent=False):
-        """Gambar satu kartu (kotak abu-abu muda) dengan judul. `accent` menambah garis hijau di kiri."""
-        rect = pygame.Rect(self.x, y, self.width, h)
-        pygame.draw.rect(surface, CARD, rect, border_radius=8)
-        if accent:
-            pygame.draw.rect(surface, ACCENT, (rect.x, rect.y + 8, 4, rect.h - 16), border_radius=2)
-        if title:
-            text(surface, self.fonts["bold"], title, (self.ix, y + 10))
-
     def draw(self, surface, mouse):
-        """Gambar seluruh panel kanan, termasuk legenda dan layar bantuan kalau sedang terbuka."""
-        fonts = self.fonts
+        """Gambar panel kiri, tombol peta, legenda, hasil pencarian, dan layar cara pakai."""
+        self.layout()
+        fonts, x = self.fonts, self.x
         pygame.draw.rect(surface, COLORS["white"], self.rect)
-        pygame.draw.line(surface, (220, 222, 226), self.rect.topleft, self.rect.bottomleft)
-        text(surface, fonts["title"], "Rute Lari Anti-Haus", (self.x, 16))
-        text(surface, fonts["small"], "Citraland Surabaya · data OSM + Google Maps", (self.x, 42), COLORS["muted"])
+        pygame.draw.line(surface, COLORS["line"], self.rect.topright, self.rect.bottomright)
+        text(surface, fonts["title"], "Rute Lari Anti-Haus", (x, 20))
+        text(surface, fonts["small"], "Rute lari yang selalu dekat tempat beli minum.", (x, 54), COLORS["muted"])
 
-        self.draw_route_card(surface, 66)
-        self.draw_result_card(surface, 270)
-        self.draw_scenario_card(surface, 474)
-        self.draw_runner_card(surface, 574)
-        self.card(surface, 698, 44, None)
-        text(surface, fonts["body"], "Tambahan", (self.ix, 720), COLORS["muted"], anchor="midleft")
-
+        self.draw_route(surface, mouse)
+        self.draw_limit(surface)
+        self.draw_result(surface)
+        clip = surface.get_clip()
+        surface.set_clip(pygame.Rect(self.rect.x, self.list_y - 12, self.rect.w, max(self.footer_y - self.list_y + 8, 0)))
+        if self.app.simulating:
+            self.draw_simulation(surface, mouse)
+        else:
+            self.draw_drinks(surface)
+        surface.set_clip(clip)
+        self.draw_footer(surface)
         for button in self.buttons:
-            button.draw(surface, fonts["body"], mouse)
-        for dropdown in self.dropdowns:
-            dropdown.draw_box(surface, fonts["body"], mouse)
-        if self.legend_open:
-            self.draw_legend(surface)
-        for dropdown in self.dropdowns:
-            if dropdown.open:
-                dropdown.draw_list(surface, fonts["body"], mouse)
+            self.draw_button(surface, button, mouse)
+        draw_map_legend(surface, self.app.map_rect, fonts["small"])
+        self.draw_zone_hint(surface, mouse)
+        if self.search.focused:
+            self.search.draw(surface, fonts["body"])
+            self.draw_results(surface, mouse)
         if self.help_open:
             self.draw_help(surface)
 
-    def draw_route_card(self, surface, y):
-        """Kartu 1: titik awal, titik akhir, dan toleransi."""
-        app, fonts = self.app, self.fonts
-        self.card(surface, y, 196, "1. Atur rute", accent=True)
-        for row_y, label in ((y + 52, "Titik awal"), (y + 86, "Titik akhir"), (y + 120, "Toleransi")):
-            text(surface, fonts["body"], label, (self.ix, row_y), anchor="midleft")
-        minus, plus = self.buttons[0].rect, self.buttons[1].rect
-        text(surface, fonts["bold"], meters(app.tolerance), ((minus.right + plus.x) / 2, y + 120), anchor="center")
-        if app.min_message:
-            text(surface, fonts["small"], app.min_message, (self.ix, y + 176), COLORS["muted"])
-
-    def draw_result_card(self, surface, y):
-        """Kartu 2: tabel panjang, selisih, dan jarak terjauh ke titik hidrasi untuk tiap rute."""
-        app, fonts, ix = self.app, self.fonts, self.ix
-        self.card(surface, y, 196, "2. Hasil: terpendek vs anti-haus", accent=True)
-        found = app.comparison.safe is not None
-        for i, line in enumerate(wrap(fonts["body"], app.comparison.status, self.iw)):
-            text(surface, fonts["body"], line, (ix, y + 34 + i * 18), COLORS["safe"] if found else COLORS["Minimarket"])
-
-        columns = (ix, ix + 88, ix + 162, ix + 236)
-        for column, header in zip(columns, ("Rute", "Panjang", "Selisih", "Terjauh ke hidrasi")):
-            text(surface, fonts["small"], header, (column, y + 76), COLORS["muted"])
-        rows = list(app.stats.items())
-        if app.trail_stats is not None:
-            rows.append(("Rute pelari", app.trail_stats))
-        base = app.stats["Baseline"]["panjang_m"]
-        for i, (label, stats) in enumerate(rows):
-            row_y = y + 94 + i * 20
-            no_diff = label == "Baseline" or (label == "Rute pelari" and not app.arrived and app.reroute is None)
-            font = fonts["bold"] if label == "Anti-haus" else fonts["body"]
-            text(surface, font, label, (columns[0], row_y))
-            text(surface, font, meters(stats["panjang_m"]), (columns[1], row_y))
-            text(surface, font, signed(None if no_diff else stats["panjang_m"] - base), (columns[2], row_y))
-            text(surface, font, meters(stats["jarak_terjauh_m"]), (columns[3], row_y))
-
-        notes = [] if found else ["Naikkan toleransi, atau klik \"Cari toleransi minimum\"."]
-        if app.trail_stats is not None:
-            notes.append(trail_note(app))
-        for i, note in enumerate(notes):
-            text(surface, fonts["small"], note, (ix, y + 98 + len(rows) * 20 + i * 16), COLORS["muted"])
-
-    def draw_scenario_card(self, surface, y):
-        """Kartu 3: berapa titik hidrasi yang sedang ditutup."""
-        app, fonts = self.app, self.fonts
-        self.card(surface, y, 92, "3. Skenario: tutup titik hidrasi")
-        text(surface, fonts["small"], "Klik titik hidrasi di peta untuk menutup / membukanya.", (self.ix, y + 34), COLORS["muted"])
-        text(surface, fonts["body"], f"Ditutup: {len(app.closed)} dari {len(app.data.points)} titik", (self.ix, y + 69), anchor="midleft")
-
-    def draw_runner_card(self, surface, y):
-        """Kartu 4: hasil tombol Hitung (titik hidrasi terdekat dari pelari)."""
-        app, fonts = self.app, self.fonts
-        self.card(surface, y, 116, "4. Demo pelari")
-        text(surface, fonts["small"], "W/A/S/D gerak · R reset", (self.ix + self.iw, y + 12), COLORS["muted"], anchor="topright")
-        if not app.calculated:
-            text(surface, fonts["small"], "Tekan tombol di atas untuk jarak ke titik hidrasi terdekat.", (self.ix, y + 76), COLORS["muted"])
+    def draw_button(self, surface, button, mouse):
+        """Gambar tombol. Gaya "segment" (pilihan) digambar di sini karena bergantung pada pilihan aktif."""
+        fonts = self.fonts
+        if button.style == "segment":
+            selected = ZONE_NAMES[self.app.zone_mode] == button.text()
+            fill = COLORS["safe"] if selected else (HOVER if button.rect.collidepoint(mouse) else COLORS["white"])
+            pygame.draw.rect(surface, fill, button.rect, border_radius=6)
+            pygame.draw.rect(surface, COLORS["safe"] if selected else BORDER, button.rect, 1, border_radius=6)
+            text(surface, fonts["small"], button.text(), button.rect.center, COLORS["white"] if selected else COLORS["text"], anchor="center")
             return
-        if app.hit is None:
-            text(surface, fonts["body"], "Tidak ada titik hidrasi yang buka.", (self.ix, y + 74))
-            return
-        text(surface, fonts["body"], f"Terdekat: {app.hit.name}", (self.ix, y + 74))
-        text(surface, fonts["bold"], f"Jarak lewat jalan: {meters(app.hit.distance_m)}", (self.ix, y + 92))
+        button.draw(surface, fonts["body"], mouse)
+        planned = self.app.planned()
+        if planned is not None and button.style == "ghost" and button.text() == kilometers(planned.line.length):
+            pygame.draw.rect(surface, COLORS["safe"], button.rect, 2, border_radius=8)
 
-    def legend_rect(self):
-        """Posisi dan ukuran kotak legenda di pojok kanan bawah peta."""
-        area = self.app.map_rect
-        rows = -(-len(LEGEND) // 2)
-        rect = pygame.Rect(0, 0, 300, 44 + rows * LEGEND_ROW_PX)
-        rect.bottomright = (area.right - 16, area.bottom - 52)
-        return rect
+    def draw_zone_hint(self, surface, mouse):
+        """Keterangan kecil di atas tombol "Garis lurus" / "Lewat jalan" saat mouse diarahkan ke sana."""
+        for button in self.buttons:
+            if button.style == "segment" and button.rect.collidepoint(mouse):
+                mode = next(mode for mode, name in ZONE_NAMES.items() if name == button.text())
+                lines = wrap(self.fonts["small"], ZONE_HINTS[mode], 260)
+                box = pygame.Rect(0, 0, 284, 16 + len(lines) * 18)
+                box.bottomright = (self.x + self.width, button.rect.y - 8)
+                pygame.draw.rect(surface, COLORS["text"], box, border_radius=8)
+                paragraph(surface, self.fonts["small"], ZONE_HINTS[mode], (box.x + 12, box.y + 8), 260, COLORS["white"], line_px=18)
 
-    def draw_legend(self, surface):
-        """Gambar kotak legenda: arti warna, garis, dan ikon di peta."""
-        fonts, box = self.fonts, self.legend_rect()
-        pygame.draw.rect(surface, COLORS["white"], box, border_radius=8)
-        pygame.draw.rect(surface, (205, 210, 216), box, 1, border_radius=8)
-        text(surface, fonts["bold"], "Legenda", (box.x + 12, box.y + 10))
-        rows = -(-len(LEGEND) // 2)
-        for i, (shape, key, label) in enumerate(LEGEND):
-            item_x, item_y = box.x + 12 + (i // rows) * 146, box.y + 42 + (i % rows) * LEGEND_ROW_PX
-            sample = [(item_x, item_y), (item_x + 18, item_y)]
-            if shape == "zone":
-                pygame.draw.rect(surface, (205, 225, 246), (item_x, item_y - 5, 18, 10))
-            elif shape == "building":
-                pygame.draw.rect(surface, COLORS[key], (item_x, item_y - 5, 18, 10))
-            elif shape == "road":
-                min_px, _, dashed = ROAD_STYLES[key]
-                draw_polyline(surface, sample, COLORS["safe_road"], min_px, dashed)
-            elif shape == "dash":
-                draw_polyline(surface, sample, COLORS[key], 3, dashed=True)
-            elif shape == "line":
-                draw_polyline(surface, sample, COLORS[key], 4)
+    def draw_route(self, surface, mouse):
+        """Bagian rute: penanda A/1/2/B tersambung garis titik-titik, dan kotak isian tiap tempat."""
+        app, fonts = self.app, self.fonts
+        text(surface, fonts["section"], "Mau lari dari mana ke mana?", (self.x, self.route_y))
+        marks = stop_marks(len(app.slots), app.loop)
+        centers = [center for _, center, _ in self.rows]
+        for (ax, ay), (_, by) in zip(centers, centers[1:]):
+            for dot_y in range(int(ay) + 14, int(by) - 12, 6):
+                pygame.draw.circle(surface, COLORS["muted"], (ax, dot_y), 1)
+        last = len(app.slots) - 1
+        for i, center, field in self.rows:
+            draw_marker(surface, center, marks[i], fonts["small"], radius=11)
+            if self.search.focused and i == app.active:
+                continue
+            looped = app.loop and i == last
+            hover = field.collidepoint(mouse) and not looped
+            pygame.draw.rect(surface, COLORS["surface"] if looped else HOVER if hover else COLORS["white"], field, border_radius=8)
+            pygame.draw.rect(surface, BORDER, field, 1, border_radius=8)
+            stop = app.slots[i]
+            if looped:
+                label, color = f"Kembali ke {app.slots[0].name}", COLORS["muted"]
+            elif stop is None:
+                label, color = self.app.placeholder(i), COLORS["muted"]
             else:
-                draw_icon(surface, key, (item_x + 9, item_y), 7)
-            text(surface, fonts["small"], label, (item_x + 26, item_y), anchor="midleft")
+                label, color = stop.name, COLORS["text"]
+            text(surface, fonts["body"], fit(fonts["body"], label, field.w - 24), (field.x + 12, field.centery), color, anchor="midleft")
+
+    def draw_limit(self, surface):
+        """Bagian jarak maksimal ke tempat minum (toleransi)."""
+        app, fonts, x = self.app, self.fonts, self.x
+        text(surface, fonts["section"], "Seberapa jauh boleh dari tempat minum?", (x, self.limit_y))
+        text(surface, fonts["big_value"], meters(app.tolerance), (x + 84, self.control_y + 18), COLORS["text"], anchor="center")
+        if app.min_message:
+            text(surface, fonts["small"], fit(fonts["small"], app.min_message, self.width), (x, self.control_y + 44), COLORS["muted"])
+
+    def draw_result(self, surface):
+        """Ringkasan hasil: panjang rute aman minum (angka besar), lalu satu kalimat pembanding dengan rute tercepat."""
+        app, fonts, x, y = self.app, self.fonts, self.x, self.result_y
+        pygame.draw.line(surface, COLORS["line"], (x, y - 16), (x + self.width, y - 16))
+        stats = app.stats.get("Anti-haus")
+        if stats is None:
+            box = pygame.Rect(x, y, self.width, self.result_h)
+            pygame.draw.rect(surface, COLORS["warning"], box, border_radius=10)
+            text(surface, fonts["bold"], "Belum ada rute" if app.needs_input else "Belum ada rute aman minum", (x + 16, y + 14))
+            paragraph(surface, fonts["small"], app.advice(), (x + 16, y + 40), self.width - 32, COLORS["text"], line_px=18)
+            return
+        number = text(surface, fonts["big"], kilometers(stats.length_m), (x, y - 6), COLORS["safe"])
+        text(surface, fonts["bold"], "Rute aman minum", (number.right + 14, number.centery - 10), anchor="midleft")
+        text(surface, fonts["small"], f"paling jauh {meters(stats.farthest_m)} dari tempat minum", (number.right + 14, number.centery + 11),
+             COLORS["muted"], anchor="midleft")
+        note_y = y + 52
+        draw_polyline(surface, [(x, note_y + 9), (x + 18, note_y + 9)], COLORS["baseline"], 4)
+        paragraph(surface, fonts["small"], self.comparison_note(), (x + 28, note_y), self.width - 28, COLORS["text"], line_px=18)
+        if len(app.comparison.options) > 1:
+            chip = next(b for b in self.buttons if b.style == "ghost" and b.text() == kilometers(app.comparison.options[0].line.length))
+            text(surface, fonts["small"], "Pilihan rute", (x, chip.rect.centery), COLORS["muted"], anchor="midleft")
+
+    def draw_drinks(self, surface):
+        """Tempat minum yang dilewati rute aman (jarak dari titik mulai), dan jarak terpanjang tanpa tempat minum."""
+        app, fonts, x, y = self.app, self.fonts, self.x, self.list_y
+        pygame.draw.line(surface, COLORS["line"], (x, y - 12), (x + self.width, y - 12))
+        text(surface, fonts["section"], "Tempat minum yang kamu lewati", (x, y))
+        stats = app.stats.get("Anti-haus")
+        if stats is None:
+            paragraph(surface, fonts["small"], "Muncul setelah rute aman minum ditemukan.", (x, y + 28), self.width, COLORS["muted"])
+            return
+        top, bottom = y + 30, self.simulate_y - 30
+        if not stats.drinks:
+            paragraph(surface, fonts["small"], f"Tidak ada toko tepat di pinggir rute (sejauh {config.ON_ROUTE_M} m), tapi semua jalannya tetap dalam jarak pilihanmu.",
+                      (x, top), self.width, COLORS["muted"], line_px=18)
+        room = max((bottom - top) // LIST_PX, 1)
+        shown = room if len(stats.drinks) <= room else room - 1  # sisakan satu baris untuk "dan n tempat lainnya"
+        for i, drink in enumerate(stats.drinks[:shown]):
+            row_y = top + i * LIST_PX
+            text(surface, fonts["bold"], kilometers(drink.along_m), (x, row_y))
+            draw_icon(surface, drink.kind, (x + 76, row_y + 10), 8)
+            text(surface, fonts["body"], fit(fonts["body"], drink.name, self.width - 96), (x + 92, row_y))
+        if len(stats.drinks) > shown:
+            text(surface, fonts["small"], f"dan {len(stats.drinks) - shown} tempat lainnya", (x + 92, top + shown * LIST_PX), COLORS["muted"])
+        text(surface, fonts["small"], f"Jarak terpanjang tanpa tempat minum: {kilometers(stats.longest_dry_m)}", (x, bottom + 4), COLORS["muted"])
+
+    def draw_simulation(self, surface, mouse):
+        """Simulasi lari: cara menggerakkan pelari, jalur larimu, dan daftar tempat minum terdekat dari posisinya."""
+        app, fonts, x, y = self.app, self.fonts, self.x, self.list_y
+        pygame.draw.line(surface, COLORS["line"], (x, y - 12), (x + self.width, y - 12))
+        text(surface, fonts["section"], "Simulasi lari", (x, y))
+        paragraph(surface, fonts["small"], SIMULATION_HINT, (x, y + 30), self.width, COLORS["muted"], line_px=18)
+        if app.trail_stats is not None:
+            pygame.draw.circle(surface, COLORS["trail"], (x + 6, self.nearest_y - 2 - 9), 5)
+        if not app.calculated:
+            if app.trail_stats is not None:
+                text(surface, fonts["small"], fit(fonts["small"], f"Jalur larimu {kilometers(app.trail_stats.length_m)}. {app.trail_note()}", self.width - 18),
+                     (x + 18, self.nearest_y - 20), COLORS["text"])
+            return
+        if not app.nearest:
+            text(surface, fonts["body"], f"Tidak ada tempat minum buka dalam {kilometers(config.NEAREST_SEARCH_M)}.", (x, self.nearest_y))
+            return
+        for i, row in self.nearest_rows:
+            hydration = app.nearest[i]
+            if i == app.hit:
+                pygame.draw.rect(surface, ACTIVE, row, border_radius=6)
+            elif row.collidepoint(mouse):
+                pygame.draw.rect(surface, HOVER, row, border_radius=6)
+            draw_icon(surface, hydration.kind, (row.x + 14, row.centery), 8)
+            text(surface, fonts["body"], fit(fonts["body"], hydration.name, row.w - 120), (row.x + 32, row.centery), anchor="midleft")
+            text(surface, fonts["bold"], f"{meters(hydration.distance_m)} lagi", (row.right - 8, row.centery), anchor="midright")
+
+    def draw_footer(self, surface):
+        """Bagian bawah: cara mengukur jarak, dan tempat minum yang sedang ditandai tutup."""
+        app, fonts, x = self.app, self.fonts, self.x
+        pygame.draw.line(surface, COLORS["line"], (x, self.footer_y), (x + self.width, self.footer_y))
+        text(surface, fonts["small"], "Ukur jarak ke tempat minum", (x, self.footer_y + 29), COLORS["muted"], anchor="midleft")
+        if app.closed:
+            text(surface, fonts["small"], f"{len(app.closed)} tempat minum ditandai tutup", (x, self.footer_y + 67), COLORS["muted"], anchor="midleft")
+
+    def draw_results(self, surface, mouse):
+        """Daftar hasil pencarian (nama, lalu jenis dan jarak dari titik mulai), di atas isi panel lainnya."""
+        app, fonts = self.app, self.fonts
+        rows = self.result_rows()
+        field = self.search.rect
+        if not rows:
+            if len(self.search.value) >= config.SEARCH_MIN_CHARS:
+                box = pygame.Rect(field.x, field.bottom + 4, self.x + self.width - field.x, RESULT_PX)
+                pygame.draw.rect(surface, COLORS["white"], box, border_radius=8)
+                pygame.draw.rect(surface, BORDER, box, 1, border_radius=8)
+                text(surface, fonts["small"], "Tidak ada di peta. Tekan Enter untuk cari lewat internet.", (box.x + 12, box.centery), COLORS["muted"], anchor="midleft")
+            return
+        area = rows[0][1].unionall([row for _, row in rows])
+        pygame.draw.rect(surface, COLORS["white"], area.inflate(0, 8), border_radius=8)
+        pygame.draw.rect(surface, BORDER, area.inflate(0, 8), 1, border_radius=8)
+        if not self.search.value:
+            text(surface, fonts["small"], "Tempat favorit", (field.right - 8, field.centery), COLORS["muted"], anchor="midright")
+        for i, row in rows:
+            place = app.results[i]
+            if row.collidepoint(mouse):
+                pygame.draw.rect(surface, ACTIVE, row)
+            text(surface, fonts["body"], fit(fonts["body"], place.name, row.w - 24), (row.x + 12, row.y + 4))
+            text(surface, fonts["small"], app.result_detail(place), (row.x + 12, row.y + 24), COLORS["muted"])
 
     def draw_help(self, surface):
-        """Gambar layar "Cara pakai" di atas peta."""
+        """Layar cara pakai: tiga langkah bernomor, penjelasan singkat cara kerjanya, dan tombol Mulai."""
         fonts = self.fonts
-        area = self.app.map_rect
-        card = pygame.Rect(0, 0, 560, 0)
-        steps = [wrap(fonts["body"], f"{i}. {step}", card.w - 48) for i, step in enumerate(HELP_STEPS, 1)]
-        card.h = 120 + sum(len(lines) * 20 + 10 for lines in steps)
+        area = surface.get_rect()
+        surface.fill(DIM, special_flags=pygame.BLEND_RGB_MULT)  # redupkan layar di belakang kartu (tanpa transparansi)
+        card = pygame.Rect(0, 0, 620, 0)
+        inner = card.w - 112
+        heights = [sum(len(wrap(font, value, inner)) for font, value in ((fonts["bold"], title), (fonts["body"], body))) for title, body in HELP_STEPS]
+        card.h = 150 + sum(h * 22 + 18 for h in heights) + len(wrap(fonts["small"], HOW_IT_WORKS, card.w - 64)) * 18 + 70
         card.center = area.center
-        shade = pygame.Surface(area.size, pygame.SRCALPHA)
-        shade.fill((27, 31, 35, 120))
-        surface.blit(shade, area.topleft)
-        pygame.draw.rect(surface, COLORS["white"], card, border_radius=10)
-        text(surface, fonts["title"], "Cara pakai", (card.x + 24, card.y + 22))
-        y = card.y + 64
-        for lines in steps:
-            for line in lines:
-                text(surface, fonts["body"], line, (card.x + 24, y))
-                y += 20
-            y += 10
-        text(surface, fonts["small"], "Klik atau tekan tombol apa saja untuk menutup. Buka lagi lewat tombol \"? Bantuan\".", (card.x + 24, card.bottom - 30), COLORS["muted"])
+        pygame.draw.rect(surface, COLORS["white"], card, border_radius=14)
+        text(surface, fonts["title"], "Selamat datang", (card.x + 32, card.y + 28))
+        paragraph(surface, fonts["body"], "Buat rute lari yang tidak pernah terlalu jauh dari tempat beli minum.", (card.x + 32, card.y + 62), card.w - 64, COLORS["muted"])
+        y = card.y + 108
+        for i, (title, body) in enumerate(HELP_STEPS, 1):
+            pygame.draw.circle(surface, COLORS["safe"], (card.x + 48, y + 11), 15)
+            text(surface, fonts["bold"], str(i), (card.x + 48, y + 11), COLORS["white"], anchor="center")
+            y = paragraph(surface, fonts["bold"], title, (card.x + 80, y), inner, line_px=22)
+            y = paragraph(surface, fonts["body"], body, (card.x + 80, y), inner, COLORS["text"], line_px=22) + 18
+        pygame.draw.line(surface, COLORS["line"], (card.x + 32, y), (card.right - 32, y))
+        y = paragraph(surface, fonts["small"], HOW_IT_WORKS, (card.x + 32, y + 14), card.w - 64, COLORS["muted"], line_px=18)
+        start = pygame.Rect(card.right - 32 - 140, card.bottom - 56, 140, 36)
+        pygame.draw.rect(surface, COLORS["safe"], start, border_radius=8)
+        text(surface, fonts["bold"], "Mulai", start.center, COLORS["white"], anchor="center")
+        text(surface, fonts["small"], "Buka lagi kapan saja lewat tombol ? di kiri atas.", (card.x + 32, start.centery), COLORS["muted"], anchor="midleft")
