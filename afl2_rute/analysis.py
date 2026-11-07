@@ -38,6 +38,7 @@ class Route:
     path: list
     line: LineString
     legs: list
+    new_share: float = 0.0  # untuk rute alternatif: berapa bagian jalannya yang belum dipakai rute sebelumnya (0 sampai 1)
 
 
 @dataclass
@@ -89,6 +90,11 @@ class RoutePlanner:
         self.data = data
         self.network = data.network
         self.zones = make_zones(data, config.ZONE_MODES)
+
+    def empty_scene(self):
+        """Scene kosong untuk saat rute belum lengkap (misal kotak "Dari" masih kosong): tanpa zona dan tanpa ruas aman."""
+        edges = self.data.edges.iloc[0:0]
+        return Scene(box(0, 0, 0, 0), self.data.points.iloc[0:0], shapely.Polygon(), edges, self.network.G.edge_subgraph([]))
 
     # --- Stop ---
     def make_stop(self, name, kind, point):
@@ -164,6 +170,7 @@ class RoutePlanner:
             new = sum(1 for pair in pairs if frozenset(pair) not in used) / max(len(pairs), 1)
             if new < config.ALTERNATIVE_MIN_NEW:
                 break
+            route.new_share = new
             found.append(route)
         return found
 

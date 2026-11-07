@@ -21,6 +21,7 @@ COLORS = {
     "Minimarket": (16, 128, 120),
     "Supermarket": (19, 90, 115),
     "Kedai minuman": (58, 147, 196),
+    "Restoran": (92, 102, 168),
     "closed": (165, 172, 175),
     "landmark": (29, 43, 51),
     "runner": (142, 91, 217),
@@ -386,6 +387,9 @@ def draw_icon(surface, kind, center, radius):
     elif kind == "Kedai minuman":
         pygame.draw.polygon(surface, white, [(x - s, y - s * 0.6), (x + s, y - s * 0.6), (x + s * 0.7, y + s * 1.2), (x - s * 0.7, y + s * 1.2)])
         pygame.draw.line(surface, white, (x + s * 0.2, y - s * 0.6), (x + s * 0.6, y - s * 1.6), 2)
+    elif kind == "Restoran":  # piring: lingkaran putih dengan lingkaran berwarna di dalamnya
+        pygame.draw.circle(surface, white, center, s * 1.5)
+        pygame.draw.circle(surface, COLORS[kind], center, s * 0.9)
     else:
         pygame.draw.polygon(surface, white, [(x - s * 1.2, y - s * 0.2), (x + s * 1.2, y - s * 0.2), (x + s * 0.8, y + s * 1.1), (x - s * 0.8, y + s * 1.1)])
         pygame.draw.arc(surface, white, (x - s * 0.7, y - s * 1.3, s * 1.4, s * 2), 0, math.pi, 2)
@@ -436,11 +440,9 @@ def draw_marker(surface, center, mark, font, radius=11):
     text(surface, font, mark, center, COLORS["white"], anchor="center")
 
 
-def draw_stops(surface, view, stops, loop, font, bold_font):
-    """Gambar titik awal, stop, dan akhir rute beserta namanya (rute muter: titik akhir = titik awal, tidak digambar dua kali)."""
-    marks = stop_marks(len(stops), loop)
-    shown = len(stops) - 1 if loop else len(stops)
-    for stop, mark in list(zip(stops, marks))[:shown]:
+def draw_stops(surface, view, marked, font, bold_font):
+    """Gambar tempat yang sudah dipilih di peta beserta namanya. `marked` = daftar (stop, tanda A/1/2/B)."""
+    for stop, mark in marked:
         x, y = view.to_screen(stop.point.x, stop.point.y)
         draw_marker(surface, (x, y), mark, bold_font)
         draw_label(surface, font, stop.name, (x + 16, y), COLORS["text"])
