@@ -9,8 +9,9 @@ from shapely.geometry import Point
 
 from . import config
 
-PRIORITY = {"Favorit": 0, "Jalan": 2}  # jenis lain = 1
+PRIORITY = {"Jalan": 2}  # jenis lain = 1: nama jalan paling akhir di hasil pencarian
 ONLINE_KIND = "Hasil online"
+PICKED_KIND = "Titik di peta"
 
 
 @dataclass
@@ -27,27 +28,37 @@ def normalize(value):
 
 
 class PlaceIndex:
-    """Daftar semua tempat yang bisa dicari: landmark favorit, tempat OSM, titik hidrasi, dan nama jalan."""
+    """Daftar semua tempat yang bisa dicari: tempat OSM, titik hidrasi, dan nama jalan. Landmark di config hanya untuk titik bawaan."""
 
     def __init__(self, data):
-        layers = [data.landmarks[["name", "kind", "geometry"]], data.places, data.points[["name", "kind", "geometry"]]]
+        layers = [data.places, data.points[["name", "kind", "geometry"]]]
+        self.landmarks = data.landmarks.set_index("name").geometry
         table = pd.concat(layers, ignore_index=True)
         table = table.drop_duplicates(subset=["name", "kind"]).reset_index(drop=True)
         table["key"] = table["name"].map(normalize)
         table["flat"] = table["key"].str.replace(" ", "")  # "g walk" -> "gwalk", supaya ketikan tanpa spasi tetap cocok
         table["priority"] = table["kind"].map(PRIORITY).fillna(1)
         self.table = table
-        self.bounds = data.edges.total_bounds
+        self.boundary = data.boundary
+        self.roads = data.edges[data.edges["road_name"].notna()]  # untuk memberi nama pada titik yang dipilih di peta
 
     def find(self, name):
-        """Tempat dengan nama persis `name` (dipakai untuk titik awal/akhir bawaan), atau None."""
+        """Tempat bawaan dengan nama `name` (landmark di config, atau tempat di data), dipakai untuk titik awal/akhir saat dibuka."""
+        if name in self.landmarks.index:
+            return Place(name, "Landmark", self.landmarks[name])
         rows = self.table[self.table["name"] == name]
         return None if rows.empty else self.place(rows.iloc[0])
 
-    def favorites(self):
-        """Landmark favorit dari config, ditampilkan saat kotak pencarian masih kosong."""
-        rows = self.table[self.table["kind"] == "Favorit"].head(config.SEARCH_RESULTS)
-        return [self.place(row) for _, row in rows.iterrows()]
+    def at_point(self, point):
+        """Tempat untuk titik yang dipilih langsung di peta: dinamai "Dekat <jalan terdekat>" (jalan sejauh MAP_PICK_ROAD_M).
+
+        None kalau titiknya di luar batas Surabaya (tidak ada data jalan di sana).
+        """
+        if not self.boundary.contains(point):
+            return None
+        found, nearest = self.roads.sindex.nearest(point, max_distance=config.MAP_PICK_ROAD_M, return_all=False)
+        name = f"Dekat {self.roads['road_name'].iloc[nearest[0]]}" if len(nearest) else "Titik di peta"
+        return Place(name, PICKED_KIND, point)
 
     def place(self, row):
         """Ubah satu baris tabel jadi Place."""
@@ -56,8 +67,8 @@ class PlaceIndex:
     def search(self, query, limit=config.SEARCH_RESULTS):
         """Cari tempat yang namanya mengandung semua kata di `query`.
 
-        Urutan hasil: nama yang diawali kata kunci dulu, lalu kata di tengah nama; landmark favorit
-        sebelum tempat lain, nama jalan paling akhir; nama yang lebih pendek (lebih persis) didahulukan.
+        Urutan hasil: nama yang diawali kata kunci dulu, lalu kata di tengah nama;
+        nama jalan paling akhir; nama yang lebih pendek (lebih persis) didahulukan.
         """
         words = normalize(query).split()
         if not words or len(" ".join(words)) < config.SEARCH_MIN_CHARS:
@@ -76,13 +87,14 @@ class PlaceIndex:
         return [self.place(row) for _, row in found.iterrows()]
 
     def search_online(self, query):
-        """Cari lewat geocoding OSM (butuh internet). None kalau tidak ketemu atau di luar area peta."""
+        """Cari lewat geocoding OSM (butuh internet). Hasilnya (Place, None), atau (None, alasan gagalnya dalam kalimat)."""
         try:
             lat, lon = ox.geocode(f"{query}, {config.AREA_PLACE}")
-        except Exception:  # tidak ada internet, server sibuk, atau tidak ketemu
-            return None
+        except ox._errors.InsufficientResponseError:
+            return None, f"\"{query}\" tidak ditemukan, juga lewat internet. Coba nama lain."
+        except Exception:  # tidak ada internet, atau server peta sedang sibuk
+            return None, "Pencarian lewat internet gagal. Cek koneksimu, lalu coba lagi."
         point = gpd.GeoSeries([Point(lon, lat)], crs=config.SOURCE_CRS).to_crs(config.ANALYSIS_CRS).iloc[0]
-        min_x, min_y, max_x, max_y = self.bounds
-        if not (min_x <= point.x <= max_x and min_y <= point.y <= max_y):
-            return None
-        return Place(query, ONLINE_KIND, point)
+        if not self.boundary.contains(point):
+            return None, f"\"{query}\" ada, tapi di luar Surabaya."
+        return Place(query, ONLINE_KIND, point), None
