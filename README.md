@@ -24,8 +24,8 @@ Kontrol: W/A/S/D gerak pelari, H daftar titik hidrasi terdekat, R reset pelari, 
 
 Peta mencakup seluruh Surabaya dan jendela bisa diperbesar. Panel kiri dibaca dari atas ke bawah seperti Google Maps:
 
-1. **Mau lari dari mana ke mana?** Klik kotak A (mulai) atau B (tujuan), ketik nama tempat (kampus, mal, taman, nama jalan, atau landmark favorit di `config.py`), lalu pilih hasilnya. "Tambah tempat singgah" menambah tempat yang mau dilewati (urutannya bisa diubah dengan tombol panah), "Kembali ke awal" membuat rute kembali ke titik mulai. Kalau tempat tidak ada di peta, tekan Enter untuk mencari lewat internet.
-2. **Seberapa jauh boleh dari tempat minum?** Jarak maksimal rute ke minimarket/kedai minuman (toleransi). "Cari jarak terkecil" mencari angka terkecil yang masih menghasilkan rute.
+1. **Mau lari dari mana ke mana?** Klik kotak A (mulai) atau B (tujuan), lalu ketik nama tempat (kampus, mal, taman, atau nama jalan) dan pilih hasilnya, **atau klik langsung titik di peta** (titiknya dinamai dari jalan terdekat; mengklik ikon toko memilih toko itu). Tombol x mengosongkan kotak. "Tambah tempat singgah" menambah tempat yang mau dilewati (urutannya bisa diubah dengan tombol panah), "Kembali ke awal" membuat rute kembali ke titik mulai. Kalau tempat tidak ada di peta, tekan Enter untuk mencari lewat internet (hasilnya hanya diterima kalau ada di Surabaya). **Rute 2 dan 3** adalah alternatif: ruas yang sudah dipakai rute sebelumnya dibuat "lebih mahal" (1,6 kali panjangnya) lalu rute dicari ulang, jadi rute berikutnya cenderung lewat jalan lain. Alternatif yang lebih dari 1,4 kali lebih panjang atau kurang dari 25% berbeda tidak ditampilkan.
+2. **Seberapa jauh boleh dari tempat minum?** Jarak maksimal rute ke minimarket, kedai minuman, atau restoran (toleransi). "Cari jarak terkecil" mencari angka terkecil yang masih menghasilkan rute.
 3. **Hasil:** panjang rute aman minum (garis biru) dibandingkan dengan rute tercepat (garis oranye), plus pilihan rute alternatif.
 4. **Tempat minum di rute** (toko yang dilewati dan jarak terpanjang tanpa toko) atau **Simulasi lari** (5 tempat minum terdekat lewat jalan dari titik ungu).
 5. **Ukur jarak ke tempat minum:** Garis lurus (buffer lingkaran) atau Lewat jalan. Klik ikon tempat minum di peta untuk menandainya tutup.
@@ -42,7 +42,7 @@ Tombol "Zona" mengganti cara ukur toleransi: Radius (buffer lingkaran) atau Lewa
 
 | File | Isi |
 |---|---|
-| `config.py` | Semua pengaturan: area, CRS, landmark favorit, tag tempat yang bisa dicari, jenis jalan, titik hidrasi manual, toleransi |
+| `config.py` | Semua pengaturan: area, CRS, landmark bawaan (titik awal/akhir saat dibuka), tag tempat yang bisa dicari, jenis jalan, titik hidrasi manual, toleransi |
 | `data.py` | Muat data satu kota dari OSM/cache: jalan, titik hidrasi, tempat untuk pencarian, landmark, bangunan; toko dan stop dijadikan node di ruas jalan terdekat |
 | `search.py` | Kelas `PlaceIndex`: pencarian tempat dari data lokal, atau online (geocoding OSM) |
 | `network.py` | Kelas `RoadNetwork`: graph jalan, memecah ruas, node sementara untuk jarak terdekat |

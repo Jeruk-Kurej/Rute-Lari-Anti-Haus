@@ -3,7 +3,7 @@ import math
 
 import pygame
 import shapely
-from shapely.geometry import LineString
+from shapely.geometry import LineString, Point
 
 from . import config
 from .analysis import Comparison, RoutePlanner
@@ -11,10 +11,10 @@ from .fonts import load_fonts
 from .network import join
 from .panel import Panel, distance_text, meters
 from .render import (
-    COLORS, MapLayer, MapView, draw_points, draw_route, draw_runner, draw_scale_bar, draw_stops, text, text_size,
+    COLORS, MapLayer, MapView, draw_points, draw_route, draw_runner, draw_scale_bar, draw_stops, stop_marks, text, text_size,
 )
 from .runner import Runner, unit
-from .search import PlaceIndex
+from .search import Place, PlaceIndex
 
 SCREEN_MARGIN_PX = 80  # jendela awal = selebar layar, setinggi layar dikurangi menu bar dan judul jendela
 WINDOW_MIN = (1100, 860)  # lebih pendek dari ini, isi panel tidak muat
@@ -56,10 +56,11 @@ class App:
         self.view = MapView(self.map_rect, data.edges.total_bounds)
         self.layer = MapLayer(self.map_rect)
         self.zoomed_at = 0
+        self.cursor = pygame.SYSTEM_CURSOR_ARROW
 
         self.slots = [self.stop_from(self.places.find(name)) for name in config.DEFAULT_STOPS]  # awal, stop..., akhir
         self.active, self.loop, self.choice = len(self.slots) - 1, False, 0
-        self.results = []
+        self.results, self.search_note = [], None
         self.tolerance = config.DEFAULT_TOLERANCE_M
         self.zone_mode = config.ZONE_MODES[0]
         self.closed = set()
@@ -111,10 +112,30 @@ class App:
         return self.planner.make_stop(place.name, place.kind, place.point)
 
     def route_stops(self):
-        """Stop yang dipakai rute, berurutan. Baris kosong dilewati; rute muter berakhir lagi di titik awal."""
-        stops = [stop for stop in self.slots[:-1] if stop is not None]
-        end = self.slots[0] if self.loop else self.slots[-1]
-        return stops + ([end] if end is not None else [])
+        """Stop yang dipakai rute, berurutan (rute muter berakhir lagi di titik awal). Kosong kalau masih ada kotak yang belum diisi."""
+        stops = self.slots[:-1] + ([self.slots[0]] if self.loop else [self.slots[-1]])
+        return [] if any(stop is None for stop in stops) else stops
+
+    def marked_stops(self):
+        """(stop, tanda) untuk semua kotak yang sudah terisi, dipakai menggambar A/1/2/B di peta walau rute belum lengkap."""
+        marks = stop_marks(len(self.slots), self.loop)
+        last = len(self.slots) - 1
+        return [(stop, mark) for i, (stop, mark) in enumerate(zip(self.slots, marks)) if stop is not None and not (self.loop and i == last)]
+
+    def missing_message(self):
+        """Kalimat yang menyebut kotak mana yang masih kosong."""
+        if self.slots[0] is None:
+            return "Isi kotak \"Mulai dari mana?\" dulu."
+        if not self.loop and self.slots[-1] is None:
+            return "Isi kotak \"Mau ke mana?\" dulu."
+        return "Isi tempat singgah yang masih kosong, atau hapus barisnya."
+
+    def clear_slot(self, index):
+        """Kosongkan titik awal atau akhir (tombol x di kotaknya)."""
+        self.slots[index] = None
+        self.active = index
+        self.min_message = None
+        self.changed(fit=True)
 
     def set_active(self, index):
         """Pilih baris yang akan diisi oleh hasil pencarian berikutnya."""
@@ -156,20 +177,25 @@ class App:
 
     def search_hint(self):
         """Teks petunjuk di kotak yang sedang diketik."""
-        return "Ketik nama tempat atau jalan..."
+        return "Ketik nama, atau klik di peta..."
 
     def on_search(self, query):
-        """Setiap ketikan berubah: cari ulang di data lokal. Kotak kosong = tampilkan tempat favorit."""
-        self.results = self.places.search(query) if query.strip() else self.places.favorites()
+        """Setiap ketikan berubah: cari ulang di data lokal (kotak kosong = tidak ada hasil)."""
+        self.results = self.places.search(query) if query.strip() else []
+        self.search_note = None
 
     def submit_search(self, query):
         """Enter: pilih hasil teratas, atau cari online kalau di data lokal tidak ada."""
         if self.results:
             self.choose_result(0)
             return
-        place = self.places.search_online(query)
+        if len(query.strip()) < config.SEARCH_MIN_CHARS:
+            return
+        self.search_note = "Mencari lewat internet..."
+        self.draw()  # tampilkan tulisan ini dulu, karena pencarian internet bisa makan waktu beberapa detik
+        place, reason = self.places.search_online(query)
         if place is None:
-            self.min_message = f"\"{query}\" tidak ditemukan di Surabaya. Coba nama lain."
+            self.search_note = reason
             return
         self.place_at_active(place)
 
@@ -204,17 +230,22 @@ class App:
         """Hitung ulang zona, rute terpendek vs anti-haus (dan alternatifnya), dan tabel hasil."""
         self.pending = None
         stops = self.route_stops()
-        self.scene = self.planner.build_scene(stops, self.tolerance, self.closed, self.zone_mode)
-        if len({stop.node for stop in stops}) < 2:
-            self.comparison = Comparison(None, [], "Rute kembali ke awal butuh minimal satu tempat singgah." if self.loop else "Isi kotak \"Mau ke mana?\" dulu.")
-            self.needs_input = True
+        if not stops:  # ada kotak yang masih kosong: belum ada zona dan rute
+            self.scene = self.planner.empty_scene()
+            self.comparison, self.needs_input = Comparison(None, [], self.missing_message()), True
         else:
-            self.comparison = self.planner.compare(self.scene, stops)
-            self.needs_input = False
+            self.scene = self.planner.build_scene(stops, self.tolerance, self.closed, self.zone_mode)
+            if len({stop.node for stop in stops}) < 2:
+                self.comparison = Comparison(None, [], "Rute kembali ke awal butuh minimal satu tempat singgah." if self.loop else "Pilih dua tempat yang berbeda.")
+                self.needs_input = True
+            else:
+                self.comparison = self.planner.compare(self.scene, stops)
+                self.needs_input = False
         self.choice = 0
         self.update_stats()
-        if fit:
-            min_x, min_y, max_x, max_y = shapely.MultiPoint([stop.point for stop in stops]).bounds
+        shown = [stop.point for stop, _ in self.marked_stops()]
+        if fit and shown:
+            min_x, min_y, max_x, max_y = shapely.MultiPoint(shown).bounds
             self.view.fit((min_x - VIEW_PADDING_M, min_y - VIEW_PADDING_M, max_x + VIEW_PADDING_M, max_y + VIEW_PADDING_M))
         self.layer.dirty = True
         self.reset_runner()
@@ -248,8 +279,11 @@ class App:
 
     def find_minimum_tolerance(self):
         """Cari toleransi terkecil yang membuat rute anti-haus ada, lalu terapkan."""
+        stops = self.route_stops()
+        if len(stops) < 2:
+            return
         self.show_busy()
-        found = self.planner.minimum_tolerance(self.route_stops(), self.closed, self.zone_mode)
+        found = self.planner.minimum_tolerance(stops, self.closed, self.zone_mode)
         if found is None:
             self.min_message = f"Sampai {meters(config.TOLERANCE_SEARCH_M[-1])} pun belum ada rute aman minum."
             return
@@ -296,8 +330,12 @@ class App:
     def reset_runner(self):
         """Kembalikan pelari ke titik awal dan hapus jejaknya."""
         stops = self.route_stops()
-        self.runner = Runner(self.data.network, stops[0].node)
         self.calculated, self.nearest, self.hit = False, [], None
+        if not stops:  # rute belum lengkap: belum ada pelari
+            self.runner, self.simulating = None, False
+            self.trail, self.arrived, self.reroute, self.trail_stats = [], False, None, None
+            return
+        self.runner = Runner(self.data.network, stops[0].node)
         self.trail, self.arrived, self.reroute = self.runner.trail(), False, None
         self.next_stop = 1  # indeks stop berikutnya yang dituju pelari
         self.tracked_at = self.runner.position
@@ -348,6 +386,8 @@ class App:
 
     def start_simulation(self):
         """Mulai simulasi lari: pelari muncul di titik A dan bisa digerakkan dengan W/A/S/D."""
+        if self.runner is None:
+            return
         self.simulating = True
         self.reset_runner()
 
@@ -358,6 +398,8 @@ class App:
 
     def calculate(self):
         """Tombol Hitung: daftar titik hidrasi terdekat lewat jalan dari posisi pelari."""
+        if self.runner is None:
+            return
         self.calculated = True
         runner = self.runner
         open_points = self.data.points[~self.data.points["name"].isin(self.closed)]
@@ -420,11 +462,14 @@ class App:
         return True
 
     def on_press(self, pos):
-        """Mouse ditekan: diteruskan ke panel, atau mulai geser peta."""
+        """Mouse ditekan: diteruskan ke panel, atau mulai geser peta. Kalau sebuah kotak sedang diisi, klik di peta memilih titik."""
         if self.panel.help_open:
             self.panel.help_open = False
-        elif not self.panel.click(pos) and self.map_rect.collidepoint(pos):
-            self.drag = {"start": pos, "moved": False}
+            return
+        filling = self.panel.search.focused
+        if not self.panel.click(pos) and self.map_rect.collidepoint(pos):
+            self.panel.search.focused = filling  # klik atau geser di peta tidak menutup kotak yang sedang diisi
+            self.drag = {"start": pos, "moved": False, "pick": filling}
 
     def on_drag(self, event):
         """Geser peta mengikuti mouse (setelah bergerak lebih dari DRAG_MIN_PX)."""
@@ -434,12 +479,26 @@ class App:
         self.view.pan(*event.rel)  # peta dasar cukup dipindah, tidak digambar ulang (lihat MapLayer)
 
     def on_release(self, pos):
-        """Mouse dilepas tanpa menggeser: kalau mengenai titik hidrasi, titik itu ditutup/dibuka."""
+        """Mouse dilepas tanpa menggeser: memilih titik (kalau sedang mengisi kotak), atau menutup/membuka titik hidrasi yang diklik."""
         drag, self.drag = self.drag, None
         if drag and not drag["moved"]:
-            name = self.point_at(pos)
-            if name:
+            if drag["pick"]:
+                self.pick_point(pos)
+            elif (name := self.point_at(pos)):
                 self.toggle_point(name)
+
+    def pick_point(self, pos):
+        """Klik di peta saat mengisi kotak: titik itu jadi isi kotaknya. Mengklik ikon toko memilih toko itu."""
+        name = self.point_at(pos)
+        if name:
+            row = self.data.points[self.data.points["name"] == name].iloc[0]
+            place = Place(name, row["kind"], row.geometry)
+        else:
+            place = self.places.at_point(Point(*self.view.to_world(*pos)))
+        if place is None:
+            self.min_message = "Titik itu di luar Surabaya, belum ada data jalannya."
+            return
+        self.place_at_active(place)
 
     def on_wheel(self, notches):
         """Scroll mouse di atas peta: zoom in/out."""
@@ -451,7 +510,7 @@ class App:
     # --- Update dan gambar ---
     def update(self, dt):
         """Dipanggil tiap frame: gerakkan pelari sesuai tombol W/A/S/D (kecuali sedang mengetik di pencarian)."""
-        if self.panel.search.focused:
+        if self.panel.search.focused or self.runner is None:
             return
         pressed = pygame.key.get_pressed()
         dx = sum(vector[0] for key, vector in MOVE_KEYS.items() if pressed[key])
@@ -494,16 +553,39 @@ class App:
             if hit is not None and hit.path is not None:
                 draw_route(self.screen, view, hit.path, COLORS["hydration_path"], view.width(3, 1.5))
         draw_points(self.screen, view, self.data.points, self.closed, self.fonts["small"], hit.name if hit else None)
-        draw_stops(self.screen, view, self.route_stops(), self.loop, self.fonts["small"], self.fonts["bold"])
+        draw_stops(self.screen, view, self.marked_stops(), self.fonts["small"], self.fonts["bold"])
         if self.simulating:
             draw_runner(self.screen, view, self.runner.position)
         draw_scale_bar(self.screen, view, self.fonts["small"])
         self.draw_tooltip(mouse)
+        self.draw_pick_banner(mouse)
         if self.pending is not None:
             self.draw_busy()
         self.screen.set_clip(None)
         self.panel.draw(self.screen, mouse)
         pygame.display.flip()
+
+    def draw_pick_banner(self, mouse):
+        """Saat sebuah kotak sedang diisi: tulisan di atas peta dan kursor silang, tanda bahwa klik di peta memilih titik."""
+        picking = self.panel.search.focused
+        crosshair = picking and self.map_rect.collidepoint(mouse) and not self.panel.help_open
+        wanted = pygame.SYSTEM_CURSOR_CROSSHAIR if crosshair else pygame.SYSTEM_CURSOR_ARROW
+        if wanted != self.cursor:
+            pygame.mouse.set_cursor(wanted)
+            self.cursor = wanted
+        if not picking:
+            return
+        font, value = self.fonts["bold"], f"Klik di peta untuk memilih {self.slot_name(self.active)}"
+        rect = pygame.Rect((0, 0), text_size(font, value))
+        rect.midtop = (self.map_rect.centerx, self.map_rect.y + 18)
+        pygame.draw.rect(self.screen, COLORS["text"], rect.inflate(32, 18), border_radius=18)
+        text(self.screen, font, value, rect.topleft, COLORS["white"])
+
+    def slot_name(self, index):
+        """Sebutan sebuah kotak untuk pengguna: titik mulai (A), tempat singgah, atau tujuan (B)."""
+        if index == 0:
+            return "titik mulai (A)"
+        return "tujuan (B)" if index == len(self.slots) - 1 else f"tempat singgah {index}"
 
     def draw_busy(self):
         """Kotak "Menghitung rute..." di tengah peta, tampil selama hitungan berjalan."""
