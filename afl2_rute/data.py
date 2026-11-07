@@ -90,9 +90,14 @@ def edge_table(G):
 
 # --- Titik hidrasi ---
 def download_hydration_points():
-    """Unduh minimarket, supermarket, dan kedai minuman seluruh kota dari OSM."""
+    """Unduh minimarket, supermarket, kedai minuman, dan restoran seluruh kota dari OSM (restoran yang tak bernama dibuang)."""
     raw = ox.features.features_from_place(config.AREA_PLACE, tags=config.OSM_HYDRATION_TAGS)
-    kind = raw["shop"].map(config.OSM_SHOP_KINDS).fillna("Kedai minuman")
+    kind = raw["shop"].map(config.OSM_SHOP_KINDS) if "shop" in raw else pd.Series(None, index=raw.index, dtype=object)
+    if "amenity" in raw:
+        kind = kind.fillna(raw["amenity"].map(config.OSM_AMENITY_KINDS))
+    kind = kind.fillna("Kedai minuman")
+    if "name" in raw:
+        raw, kind = raw[~(raw["name"].isna() & (kind == "Restoran"))], kind[~(raw["name"].isna() & (kind == "Restoran"))]
     layer = as_points(gpd.GeoDataFrame({"name": raw["name"].fillna(kind), "kind": kind}, geometry=raw.geometry, crs=raw.crs))
     return layer.to_crs(config.SOURCE_CRS)
 
@@ -162,7 +167,7 @@ def geocode_landmarks(landmarks):
         except ox._errors.InsufficientResponseError:
             missing.append(name)
             continue
-        rows.append({"name": name, "kind": "Favorit", "geometry": Point(lon, lat)})
+        rows.append({"name": name, "kind": "Landmark", "geometry": Point(lon, lat)})
     if missing:
         print(f"Landmark tidak ditemukan di OSM: {missing}. Isi LANDMARKS dengan (lat, lon) dari Google Maps.")
     return gpd.GeoDataFrame(rows, geometry="geometry", crs=config.SOURCE_CRS) if rows else None
@@ -173,7 +178,7 @@ def with_new_landmarks(cached_landmarks):
     known = set(cached_landmarks["name"])
     new = geocode_landmarks({name: query for name, query in config.LANDMARKS.items() if name not in known})
     layer = cached_landmarks if new is None else pd.concat([cached_landmarks, new], ignore_index=True)
-    layer["kind"] = "Favorit"
+    layer["kind"] = "Landmark"
     return layer
 
 

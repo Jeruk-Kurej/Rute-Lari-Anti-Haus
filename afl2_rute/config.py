@@ -9,7 +9,8 @@ ANALYSIS_CRS = "EPSG:32749"  # UTM 49S, satuan meter
 # --- Cache (data OSM hasil unduhan; jangan dihapus, titik/landmark baru di bawah tetap terbaca) ---
 CACHE_DIR = Path(__file__).resolve().parent / "cache"
 
-# --- Landmark favorit: muncul paling atas di pencarian. Kata kunci OSM, atau (lat, lon) dari Google Maps ---
+# --- Landmark bawaan: hanya dipakai untuk titik awal dan akhir saat program dibuka (tidak muncul di pencarian) ---
+# Kata kunci OSM, atau (lat, lon) dari Google Maps
 LANDMARKS = {
     "UC": "Universitas Ciputra Surabaya",
     "G-Walk": "Gwalk Citraland Surabaya",
@@ -44,6 +45,7 @@ PLACE_KINDS = {
     "mall": "Mal", "department_store": "Mal", "supermarket": "Supermarket", "convenience": "Minimarket",
     "suburb": "Kawasan", "neighbourhood": "Kawasan", "quarter": "Kawasan", "village": "Kelurahan", "station": "Stasiun",
 }
+MAP_PICK_ROAD_M = 300  # titik yang dipilih di peta dinamai dari jalan terdekat, selama masih sedekat ini
 SEARCH_RESULTS = 7
 SEARCH_MIN_CHARS = 2
 
@@ -56,7 +58,10 @@ OTHER_ROAD_CLASS = "Setapak/servis"
 STREET_SEARCH_M = 150
 
 # --- Titik hidrasi permanen ---
-OSM_HYDRATION_TAGS = {"shop": ["convenience", "supermarket", "beverages", "coffee", "tea"], "amenity": "cafe"}
+OSM_HYDRATION_TAGS = {
+    "shop": ["convenience", "supermarket", "beverages", "coffee", "tea"],
+    "amenity": ["cafe", "restaurant", "fast_food", "food_court"],  # restoran juga jual minum (kesepakatan kelompok)
+}
 OSM_SHOP_KINDS = {
     "convenience": "Minimarket",
     "supermarket": "Supermarket",
@@ -64,6 +69,7 @@ OSM_SHOP_KINDS = {
     "coffee": "Kedai minuman",
     "tea": "Kedai minuman",
 }
+OSM_AMENITY_KINDS = {"cafe": "Kedai minuman", "restaurant": "Restoran", "fast_food": "Restoran", "food_court": "Restoran"}
 DUPLICATE_RADIUS_M = 50
 MANUAL_POINTS = {
     "Indomaret Sentra Niaga": ("Minimarket", (-7.2919116, 112.6353231)),
