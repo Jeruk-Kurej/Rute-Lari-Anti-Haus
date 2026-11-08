@@ -15,12 +15,12 @@ LIST_PX = 26
 HELP_STEPS = [
     ("Tentukan rute", "Klik kotak \"Dari\" dan \"Ke\", lalu ketik nama tempat (kampus, mal, taman, atau nama jalan) dan pilih hasilnya, atau langsung klik titik di peta. Tombol x mengosongkan kotak. Mau mampir dulu? Klik \"Tambah tempat singgah\"."),
     ("Atur jarak ke tempat minum", "Pilih seberapa jauh kamu boleh berada dari minimarket, kedai minuman, atau restoran. Makin kecil, makin aman, tapi rutenya bisa lebih panjang."),
-    ("Ikuti rute biru", "Garis biru selalu lewat jalan yang dekat tempat minum, garis oranye adalah rute tercepat sebagai pembanding. Toko tutup? Klik ikonnya di peta. Mau mencoba berlari? Klik \"Coba lari (simulasi)\"."),
+    ("Ikuti rute biru", "Garis biru selalu lewat jalan yang dekat tempat minum, garis oranye adalah rute tercepat sebagai pembanding. Toko tutup? Klik ikonnya di peta. Mau mencoba berlari? Gerakkan titik ungu dengan W A S D."),
 ]
 HOW_IT_WORKS = ("Cara kerjanya: setiap tempat minum diberi lingkaran sejauh jarak pilihanmu (buffer), semua lingkaran digabung "
                 "(union), lalu hanya jalan yang seluruhnya di dalam gabungan itu yang boleh dilewati (within). Rute terpendek "
                 "di jalan-jalan itu dicari dengan algoritma Dijkstra.")
-SIMULATION_HINT = "Gerakkan titik ungu dengan tombol W A S D. Tekan R untuk mulai ulang dari titik A."
+RUNNER_HINT = "Coba berlari: gerakkan titik ungu dengan tombol W A S D. Tekan R untuk mulai ulang dari titik A."
 ZONE_NAMES = {"Radius": "Garis lurus", "Lewat jalan": "Lewat jalan"}
 ZONE_HINTS = {
     "Radius": "Jarak udara dari toko (lingkaran). Cepat dihitung, tapi jalan di seberang sungai atau pagar bisa dianggap dekat.",
@@ -167,22 +167,18 @@ class Panel:
         if app.closed:
             self.buttons.append(Button(pygame.Rect(right - 100, self.footer_y + 52, 100, 30), "Buka semua", app.open_all, style="link"))
 
-        # 4. Tempat minum yang dilewati, atau simulasi lari
+        # 4. Daftar tempat minum, dan di bawahnya kontrol pelari (pelari selalu aktif begitu rute lengkap)
         self.list_y = self.result_y + self.result_h + 22
-        if app.simulating:
-            self.buttons.append(Button(pygame.Rect(right - 80, self.list_y - 4, 80, 28), "Selesai", app.stop_simulation, style="link"))
-            self.trail_y = self.list_y + 30 + len(wrap(self.fonts["small"], SIMULATION_HINT, self.width)) * 18 + 6
-            trail_h = len(wrap(self.fonts["small"], self.trail_text(), self.width - 18)) * 18 + 8 if app.trail_stats is not None else 0
-            calc_y = self.trail_y + trail_h
-            self.buttons.append(Button(pygame.Rect(x, calc_y, self.width, 34), "Cari tempat minum terdekat (H)", app.calculate, style="primary"))
-            self.nearest_y = calc_y + 44
-            room = max((self.footer_y - 8 - self.nearest_y) // LIST_PX, 0)
-            for i in range(min(len(app.nearest), room)):
-                self.nearest_rows.append((i, pygame.Rect(x, self.nearest_y + i * LIST_PX, self.width, LIST_PX)))
-        else:
-            self.simulate_y = self.footer_y - 50
-            self.buttons.append(Button(pygame.Rect(x, self.simulate_y, self.width, 36), "Coba lari (simulasi)", app.start_simulation,
-                                       lambda: app.runner is not None))
+        hint_h = len(wrap(self.fonts["small"], RUNNER_HINT, self.width)) * 18
+        trail_h = len(wrap(self.fonts["small"], self.trail_text(), self.width - 18)) * 18 + 8 if app.trail_stats is not None else 0
+        self.runner_y = self.footer_y - (hint_h + 6 + trail_h + 44)
+        self.trail_y = self.runner_y + hint_h + 6
+        self.buttons.append(Button(pygame.Rect(x, self.trail_y + trail_h, self.width, 34), "Cari tempat minum terdekat (H)", app.calculate,
+                                   lambda: app.runner is not None, style="primary"))
+        self.nearest_y = self.list_y + 30
+        room = max((self.runner_y - 8 - self.nearest_y) // LIST_PX, 0)
+        for i in range(min(len(app.nearest), room)):
+            self.nearest_rows.append((i, pygame.Rect(x, self.nearest_y + i * LIST_PX, self.width, LIST_PX)))
 
         # Tombol di peta: zoom dan kembali ke rute
         area = app.map_rect
@@ -250,10 +246,11 @@ class Panel:
         self.draw_result(surface)
         clip = surface.get_clip()
         surface.set_clip(pygame.Rect(self.rect.x, self.list_y - 12, self.rect.w, max(self.footer_y - self.list_y + 8, 0)))
-        if self.app.simulating:
-            self.draw_simulation(surface, mouse)
+        if self.app.calculated:
+            self.draw_nearest(surface, mouse)
         else:
             self.draw_drinks(surface)
+        self.draw_runner_info(surface)
         surface.set_clip(clip)
         self.draw_footer(surface)
         for button in self.buttons:
@@ -365,7 +362,7 @@ class Panel:
         return f"Rute {app.choice + 1}: +{distance_text(route.line.length - best.line.length)}, {round(route.new_share * 100)}% jalan berbeda dari rute lain."
 
     def draw_drinks(self, surface):
-        """Tempat minum yang dilewati rute aman (jarak dari titik mulai), dan jarak terpanjang tanpa tempat minum."""
+        """Tempat minum yang dilewati rute aman (jarak dari titik mulai)."""
         app, fonts, x, y = self.app, self.fonts, self.x, self.list_y
         pygame.draw.line(surface, COLORS["line"], (x, y - 12), (x + self.width, y - 12))
         text(surface, fonts["section"], "Tempat minum yang kamu lewati", (x, y))
@@ -373,7 +370,7 @@ class Panel:
         if stats is None:
             paragraph(surface, fonts["small"], "Muncul setelah rute aman minum ditemukan.", (x, y + 28), self.width, COLORS["muted"])
             return
-        top, bottom = y + 30, self.simulate_y - 30
+        top, bottom = y + 30, self.runner_y - 8
         if not stats.drinks:
             paragraph(surface, fonts["small"], f"Tidak ada toko tepat di pinggir rute (sejauh {config.ON_ROUTE_M} m), tapi semua jalannya tetap dalam jarak pilihanmu.",
                       (x, top), self.width, COLORS["muted"], line_px=18)
@@ -386,19 +383,22 @@ class Panel:
             text(surface, fonts["body"], fit(fonts["body"], drink.name, self.width - 96), (x + 92, row_y))
         if len(stats.drinks) > shown:
             text(surface, fonts["small"], f"dan {len(stats.drinks) - shown} tempat lainnya", (x + 92, top + shown * LIST_PX), COLORS["muted"])
-        text(surface, fonts["small"], f"Jarak terpanjang tanpa tempat minum: {kilometers(stats.longest_dry_m)}", (x, bottom + 4), COLORS["muted"])
 
-    def draw_simulation(self, surface, mouse):
-        """Simulasi lari: cara menggerakkan pelari, jalur larimu, dan daftar tempat minum terdekat dari posisinya."""
-        app, fonts, x, y = self.app, self.fonts, self.x, self.list_y
-        pygame.draw.line(surface, COLORS["line"], (x, y - 12), (x + self.width, y - 12))
-        text(surface, fonts["section"], "Simulasi lari", (x, y))
-        paragraph(surface, fonts["small"], SIMULATION_HINT, (x, y + 30), self.width, COLORS["muted"], line_px=18)
+    def draw_runner_info(self, surface):
+        """Cara menggerakkan pelari, dan keterangan jalur larimu kalau ia keluar dari rute."""
+        app, fonts, x = self.app, self.fonts, self.x
+        if app.runner is None:
+            return
+        paragraph(surface, fonts["small"], RUNNER_HINT, (x, self.runner_y), self.width, COLORS["muted"], line_px=18)
         if app.trail_stats is not None:  # pelari keluar jalur: tampilkan panjang jalurnya dan apa yang harus dilakukan
             pygame.draw.circle(surface, COLORS["trail"], (x + 6, self.trail_y + 9), 5)
             paragraph(surface, fonts["small"], self.trail_text(), (x + 18, self.trail_y), self.width - 18, COLORS["text"], line_px=18)
-        if not app.calculated:
-            return
+
+    def draw_nearest(self, surface, mouse):
+        """Daftar tempat minum terdekat lewat jalan dari posisi pelari (setelah menekan tombol Cari)."""
+        app, fonts, x, y = self.app, self.fonts, self.x, self.list_y
+        pygame.draw.line(surface, COLORS["line"], (x, y - 12), (x + self.width, y - 12))
+        text(surface, fonts["section"], "Tempat minum terdekat darimu", (x, y))
         if not app.nearest:
             text(surface, fonts["body"], f"Tidak ada tempat minum buka dalam {kilometers(config.NEAREST_SEARCH_M)}.", (x, self.nearest_y))
             return
