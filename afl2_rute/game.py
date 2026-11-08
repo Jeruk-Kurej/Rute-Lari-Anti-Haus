@@ -340,6 +340,7 @@ class App:
         self.tracked_at = self.runner.position
         self.aim()
         self.update_trail()
+        self.calculate()  # daftar tempat minum terdekat dari titik awal langsung tampil
 
     def aim(self):
         """Siapkan jarak dari tiap persimpangan aman ke stop berikutnya (dipakai rute ulang)."""
