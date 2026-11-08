@@ -68,7 +68,6 @@ class App:
         self.drag, self.pending = None, None
         self.comparison, self.needs_input = Comparison(None, [], ""), True
         self.stats, self.trail_stats, self.nearest = {}, None, []
-        self.simulating = False  # pelari hanya tampil dan bisa digerakkan saat simulasi lari
         self.panel = Panel(self, pygame.Rect(0, 0, PANEL_WIDTH, height), self.fonts)
         self.refresh(fit=True)
 
@@ -332,7 +331,7 @@ class App:
         stops = self.route_stops()
         self.calculated, self.nearest, self.hit = False, [], None
         if not stops:  # rute belum lengkap: belum ada pelari
-            self.runner, self.simulating = None, False
+            self.runner = None
             self.trail, self.arrived, self.reroute, self.trail_stats = [], False, None, None
             return
         self.runner = Runner(self.data.network, stops[0].node)
@@ -384,18 +383,6 @@ class App:
                 line = join(self.trail, list(self.reroute.line.coords), *rest)
         self.trail_stats = self.planner.stats(LineString(line), self.scene.points)
 
-    def start_simulation(self):
-        """Mulai simulasi lari: pelari muncul di titik A dan bisa digerakkan dengan W/A/S/D."""
-        if self.runner is None:
-            return
-        self.simulating = True
-        self.reset_runner()
-
-    def stop_simulation(self):
-        """Selesai simulasi: pelari, jejak, dan daftar tempat minum terdekat disembunyikan."""
-        self.simulating = False
-        self.reset_runner()
-
     def calculate(self):
         """Tombol Hitung: daftar titik hidrasi terdekat lewat jalan dari posisi pelari."""
         if self.runner is None:
@@ -405,7 +392,6 @@ class App:
         open_points = self.data.points[~self.data.points["name"].isin(self.closed)]
         self.nearest = self.planner.nearest_hydrations(open_points, runner.u, runner.v, runner.s)
         self.hit = 0 if self.nearest else None
-        self.simulating = True
 
     def point_at(self, pos):
         """Nama titik hidrasi yang ada di bawah posisi mouse `pos`, atau None."""
@@ -516,8 +502,6 @@ class App:
         dx = sum(vector[0] for key, vector in MOVE_KEYS.items() if pressed[key])
         dy = sum(vector[1] for key, vector in MOVE_KEYS.items() if pressed[key])
         if dx or dy:
-            if not self.simulating:  # menekan W/A/S/D langsung memulai simulasi
-                self.start_simulation()
             self.runner.move(unit(dx, dy), RUNNER_SPEED_MPS * dt)
             self.track_runner()
             self.follow_runner()
@@ -544,7 +528,7 @@ class App:
         if comparison.options:  # hanya rute yang dipilih; alternatif lain dipilih lewat panel
             draw_route(self.screen, view, self.planned().line, COLORS["safe"], view.width(4, 2.5))
         hit = None
-        if self.simulating:
+        if self.runner is not None:
             if self.reroute is not None:
                 draw_route(self.screen, view, self.reroute.line, COLORS["reroute"], view.width(4, 2.5))
             if self.trail_stats is not None:
@@ -554,7 +538,7 @@ class App:
                 draw_route(self.screen, view, hit.path, COLORS["hydration_path"], view.width(3, 1.5))
         draw_points(self.screen, view, self.data.points, self.closed, self.fonts["small"], hit.name if hit else None)
         draw_stops(self.screen, view, self.marked_stops(), self.fonts["small"], self.fonts["bold"])
-        if self.simulating:
+        if self.runner is not None:
             draw_runner(self.screen, view, self.runner.position)
         draw_scale_bar(self.screen, view, self.fonts["small"])
         self.draw_tooltip(mouse)
