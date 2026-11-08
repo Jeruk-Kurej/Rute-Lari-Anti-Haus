@@ -463,7 +463,7 @@ MAP_LEGEND = [
     ("line", "baseline", "Rute tercepat"),
     ("zone", "zone", "Dekat tempat minum"),
     ("icon", "Minimarket", "Tempat minum"),
-    ("dot", "runner", "Kamu (saat simulasi)"),
+    ("dot", "runner", "Kamu (pelari)"),
     ("outside", "outside", "Di luar Surabaya (tanpa data)"),
 ]
 
